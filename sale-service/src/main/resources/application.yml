@@ -14,6 +14,14 @@ spring:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        # Idempotent producer: retries never duplicate a record.
+        enable.idempotence: true
+        # Fail fast instead of blocking a request thread for 60 s when no broker is reachable.
+        max.block.ms: 2000
+        # Upper bound on when a send's final result is known (drives late compensation).
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
 
 management:
   endpoints:
