@@ -6,6 +6,7 @@ import com.flashsale.sale.config.RedisConfig;
 import com.flashsale.sale.redis.RedisKeys;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -13,7 +14,6 @@ import org.springframework.kafka.support.SendResult;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.time.Clock;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -34,18 +34,16 @@ public class BuyService {
     private final RedisScript<Long> buyScript;
     private final KafkaTemplate<String, String> kafka;
     private final ObjectMapper json;
-    private final Clock clock;
 
     /** Sales this instance has seen sell out; lets it answer 410 without a Redis call. */
     private final Set<Long> soldOut = ConcurrentHashMap.newKeySet();
 
-    public BuyService(StringRedisTemplate redis, RedisScript<Long> buyScript,
-                      KafkaTemplate<String, String> kafka, ObjectMapper json, Clock clock) {
+    public BuyService(StringRedisTemplate redis, @Qualifier("buyScript") RedisScript<Long> buyScript,
+                      KafkaTemplate<String, String> kafka, ObjectMapper json) {
         this.redis = redis;
         this.buyScript = buyScript;
         this.kafka = kafka;
         this.json = json;
-        this.clock = clock;
     }
 
     public BuyResult buy(long saleId, long userId) {
@@ -55,7 +53,7 @@ public class BuyService {
 
         Long result = redis.execute(buyScript,
                 List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId), RedisKeys.window(saleId)),
-                Long.toString(userId), Long.toString(clock.millis()));
+                Long.toString(userId));
         if (result == null) {
             throw new IllegalStateException("buy.lua returned no result");
         }
