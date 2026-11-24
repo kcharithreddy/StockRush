@@ -10,9 +10,6 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -31,7 +28,6 @@ class BuyServiceTest {
 
     private static final long SALE = 1;
     private static final long USER = 42;
-    private static final long NOW = 1_700_000_000_000L;
 
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
     private final ValueOperations<String, String> values = mock(ValueOperations.class);
@@ -45,12 +41,11 @@ class BuyServiceTest {
     void setUp() {
         when(redis.opsForValue()).thenReturn(values);
         when(redis.opsForSet()).thenReturn(sets);
-        Clock clock = Clock.fixed(Instant.ofEpochMilli(NOW), ZoneOffset.UTC);
-        service = new BuyService(redis, script, kafka, new ObjectMapper(), clock);
+        service = new BuyService(redis, script, kafka, new ObjectMapper());
     }
 
     private void luaReturns(long result) {
-        when(redis.execute(eq(script), any(List.class), any(), any())).thenReturn(result);
+        when(redis.execute(eq(script), any(List.class), any())).thenReturn(result);
     }
 
     private void kafkaReturns(CompletableFuture<SendResult<String, String>> future) {
@@ -66,7 +61,7 @@ class BuyServiceTest {
 
         assertThat(result.outcome()).isEqualTo(BuyOutcome.SUCCESS);
         assertThat(result.orderToken()).isNotBlank();
-        verify(redis).execute(script, List.of("sale:1:stock", "sale:1:buyers", "sale:1:window"), "42", Long.toString(NOW));
+        verify(redis).execute(script, List.of("sale:1:stock", "sale:1:buyers", "sale:1:window"), "42");
         verify(kafka).send(eq("order-created"), eq("42"),
                 eq("{\"orderToken\":\"" + result.orderToken() + "\",\"saleId\":1,\"userId\":42}"));
     }
@@ -78,7 +73,7 @@ class BuyServiceTest {
         assertThat(service.buy(SALE, USER).outcome()).isEqualTo(BuyOutcome.SOLD_OUT);
         assertThat(service.buy(SALE, 43).outcome()).isEqualTo(BuyOutcome.SOLD_OUT);
 
-        verify(redis, times(1)).execute(eq(script), any(List.class), any(), any());
+        verify(redis, times(1)).execute(eq(script), any(List.class), any());
         service.clearSoldOutFlags();
         assertThat(service.isFlaggedSoldOut(SALE)).isFalse();
     }
