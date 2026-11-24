@@ -55,7 +55,8 @@ Nginx :8080  ── per-IP rate limit, round-robin
                 ▼
         PostgreSQL :5432  (source of truth for orders)
 
-Prometheus :9090 scrapes sale-1, sale-2, order-service at /actuator/prometheus
+Prometheus :9090 scrapes sale-1, sale-2 (:9080) and order-service (:9091) at /actuator/prometheus
+(management ports, never published outside the Docker network)
 Grafana :3000 reads Prometheus
 ```
 
@@ -76,8 +77,12 @@ flash-sale-system/
 ├── ARCHITECTURE.md
 ├── README.md
 ├── docker-compose.yml
+├── SECURITY.md
+├── .env.example             # copy to .env (git-ignored); all passwords live there
+├── .github/                 # CI, CodeQL, Dependabot
 ├── infra/
 │   ├── schema.sql
+│   ├── db-init/02-app-user.sh   # least-privilege DB role
 │   ├── nginx.conf
 │   └── prometheus.yml
 ├── sale-service/            # Spring Boot app, package com.flashsale.sale
@@ -127,6 +132,8 @@ VALUES (1, 100, 4999900, now(), now() + interval '30 days');
 
 Money is always integer paise. Never floats.
 
+The tables are owned by the `postgres` superuser, which only initialises the database. The services connect as `DB_USER` (`infra/db-init/02-app-user.sh`): `SELECT` on `products` and `flash_sales`, `SELECT/INSERT/UPDATE/DELETE` on `orders`, no DDL, not a superuser.
+
 ## 6. Redis keys
 
 | Key | Type | Meaning | Written by |
@@ -142,14 +149,16 @@ A user whose order expires stays in `buyers` — one attempt per user per sale (
 
 ```
 -- KEYS[1] = sale:{id}:stock   KEYS[2] = sale:{id}:buyers   KEYS[3] = sale:{id}:window
--- ARGV[1] = userId            ARGV[2] = now (epoch millis)
+-- ARGV[1] = userId
 -- Returns: 1 success | 0 sold out | -1 already bought | -2 sale not active
+-- "now" comes from Redis's own clock, so every sale-service instance judges the window identically.
 local window = redis.call('GET', KEYS[3])
 if not window then return -2 end
 local sep = string.find(window, ',')
 local startsAt = tonumber(string.sub(window, 1, sep - 1))
 local endsAt = tonumber(string.sub(window, sep + 1))
-local now = tonumber(ARGV[2])
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 if now < startsAt or now > endsAt then return -2 end
 if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return -1 end
 local stock = tonumber(redis.call('GET', KEYS[1]) or '0')
@@ -183,9 +192,11 @@ User identity is a mock header `X-User-Id: <long>` (README notes that production
 | 0 | 410 | `{"status":"SOLD_OUT"}` |
 | -1 | 409 | `{"status":"ALREADY_BOUGHT"}` |
 | -2 | 403 | `{"status":"SALE_NOT_ACTIVE"}` |
-| 1 but Kafka send failed | 503 | `{"status":"TRY_AGAIN"}` |
-| missing header | 401 | — |
-| > 5 req/s for this user | 429 | — |
+| 1 but Kafka send failed or timed out | 503 | `{"status":"TRY_AGAIN"}` |
+| Redis unavailable | 503 + `Retry-After: 1` | `{"status":"TRY_AGAIN"}` |
+| missing, non-numeric or non-positive `X-User-Id` | 401 | — |
+| `saleId` ≤ 0 | 400 | — |
+| > 5 req/s for this user | 429 + `Retry-After: 1` | — |
 
 `GET /sales/{saleId}/stock` → `{"stock": <int>}` (reads Redis)
 
@@ -196,7 +207,9 @@ User identity is a mock header `X-User-Id: <long>` (README notes that production
 | `GET /orders/{token}` | `{"status": "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "PROCESSING"}` — PROCESSING if no row yet |
 | `POST /orders/{token}/pay` | `UPDATE ... SET status='PAID' WHERE order_token=? AND status='PENDING_PAYMENT'`; 200 `{"status":"PAID"}` if 1 row, else 409 `{"status":"NOT_PAYABLE"}` |
 | `POST /admin/sales/{id}/warmup` | stock in Redis = total_stock − count(orders PENDING_PAYMENT or PAID); sets `window`; returns `{"saleId","stock"}` |
-| `POST /admin/sales/{id}/reset` | TEST ONLY: delete the sale's orders, delete `stock` and `buyers` keys, then warm-up |
+| `POST /admin/sales/{id}/reset` | TEST ONLY: delete the sale's orders, delete `stock` and `buyers` keys, then warm-up. Exists only when `RESET_ENABLED=true`; otherwise 404 |
+
+Admin endpoints are not authenticated until Step B of §17 (Keycloak `admin` role). Until then order-service must never be published beyond `127.0.0.1` or the Docker network.
 
 ## 10. Request flows
 
@@ -206,7 +219,10 @@ User identity is a mock header `X-User-Id: <long>` (README notes that production
 2. Run `buy.lua` with keys/args from §7.
 3. On 0, set the local sold-out flag. Clear ALL flags every 5 s with `@Scheduled` (stock can come back).
 4. On 1: generate a UUID `orderToken`, send `OrderCreatedEvent` synchronously.
-5. If the send throws: compensate — `INCR stock`, `SREM buyers userId`, clear the sold-out flag for the sale — and return 503.
+5. If the send fails, compensate — `INCR stock`, `SREM buyers userId`, clear the sold-out flag for the sale — and return 503:
+   - Kafka rejects the record (`send()` throws, e.g. no broker within `max.block.ms` = 2 s) or reports failure → compensate immediately.
+   - No answer within 2 s → return 503 but keep the unit reserved; compensate only if Kafka later reports a final failure (bounded by `delivery.timeout.ms` = 10 s). A late success becomes a normal order, so the unit is never sold twice.
+   - The producer is idempotent (`enable.idempotence=true`).
 
 ### Order creation (order-service `OrderConsumer`)
 
@@ -237,7 +253,7 @@ Every 60 s, for each sale currently within its window: `expected = total_stock �
 
 ## 11. Rate limiting
 
-- **Per user (sale-service):** `HandlerInterceptor` on `/sales/*/buy`. Fixed window: `INCR rl:{userId}:{epochSecond}`, `EXPIRE 2` on first hit, reject with 429 above 5.
+- **Per user (sale-service):** `HandlerInterceptor` on `/sales/*/buy`. Fixed window: `INCR rl:{userId}:{epochSecond}`, `EXPIRE 2` on first hit (both in `scripts/rate_limit.lua`, so they are atomic), reject with 429 above 5.
 - **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The README must say to comment this out for k6 runs (all k6 traffic is one IP).
 
 ## 12. Configuration
@@ -250,10 +266,16 @@ Each service reads env vars with local defaults so it runs from the IDE AND in D
 | `REDIS_HOST` | localhost | localhost | redis |
 | `KAFKA` | localhost:9092 | localhost:9092 | kafka:29092 |
 | `DB_HOST` | — | localhost | postgres |
+| `MANAGEMENT_PORT` | 9081 | 9091 | 9080 for sale containers |
+| `REDIS_PASSWORD` | from `.env` | from `.env` | from `.env` |
+| `DB_USER` / `DB_PASSWORD` | — | from `.env` | from `.env` |
+| `RESET_ENABLED` | — | false | from `.env` |
+
+Secrets have no defaults: a service refuses to start without them. Locally each service imports the repo's `.env` (`spring.config.import: optional:file:.env[.properties]` and `../.env`); in Docker compose passes the same values as environment variables. Compose binds every published port to `127.0.0.1`. Redis and Lettuce use a 1 s command and connect timeout.
 
 Kafka listeners in compose: `INTERNAL://kafka:29092` (containers), `EXTERNAL://localhost:9092` (host), `CONTROLLER://:9093`; `KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL`; all replication factors 1.
 
-Both services: Actuator with `health,prometheus` exposed, `micrometer-registry-prometheus`. sale-service: `management.metrics.distribution.percentiles-histogram.http.server.requests=true`. Both main classes: `@EnableScheduling`.
+Both services: Actuator with `health,prometheus` exposed on the separate `MANAGEMENT_PORT` only (the public port returns 404 for `/actuator/**`), liveness/readiness probes on, graceful shutdown, `micrometer-registry-prometheus`. Error responses never include messages or stack traces. sale-service: `management.metrics.distribution.percentiles-histogram.http.server.requests=true`. Both main classes: `@EnableScheduling`.
 
 ## 13. Metrics
 
@@ -273,8 +295,9 @@ Grafana panels (document the PromQL in README):
 2. sale-service never touches PostgreSQL.
 3. Every Kafka consumer write is idempotent.
 4. State changes on orders are conditional updates (`WHERE status = ...`), never read-then-write.
-5. No secrets beyond the local dev credentials in compose (`flash` / `flash`).
+5. No secrets in the repository. Every password comes from the git-ignored `.env` (template: `.env.example`).
 6. Every phase ends with its acceptance checks passing and a git commit.
+7. Nothing is published beyond `127.0.0.1` except Nginx; services connect with least-privilege credentials (§17).
 
 ## 15. Build phases
 
@@ -322,13 +345,52 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 ## 16. Commands cheat-sheet
 
 ```sh
+cp .env.example .env                      # once; then change the passwords
 docker compose up -d                      # start everything
 (cd sale-service && ./mvnw -DskipTests package)
 (cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build              # rebuild services after code changes
 curl -X POST localhost:8090/admin/sales/1/reset
 k6 run loadtest/flash-sale.js
-docker compose exec postgres psql -U flash -d flashsale
-docker compose exec redis redis-cli
+docker compose exec postgres psql -U postgres -d flashsale
+docker compose exec redis redis-cli     # authenticates via REDISCLI_AUTH
+docker compose down -v                    # wipe data (needed after changing DB passwords)
 ```
+
+## 17. Security
+
+### In place (Step A)
+
+| Threat | Control |
+| :---- | :---- |
+| Infrastructure reachable from the network | Every compose port bound to `127.0.0.1` |
+| Anyone editing stock or flushing Redis | `requirepass` from `.env` |
+| App able to drop tables / read everything | Least-privilege `DB_USER`; superuser only initialises |
+| Secrets in git | `.env` git-ignored; no defaults for secrets; `.env.example` only |
+| Metrics and health leaking internals | Actuator on an internal management port |
+| Accidental data wipe | `reset` endpoint absent unless `RESET_ENABLED=true` |
+| Malformed or hostile input | Positive `saleId` (400) and `X-User-Id` (401), header length capped |
+| Hung threads / cascading failure on Redis outage | 1 s Redis timeouts, clean 503 + `Retry-After` |
+| Rate-limit counter without TTL | Atomic `rate_limit.lua` |
+| Instance clock skew deciding the sale window | `buy.lua` uses Redis `TIME` |
+| Stack traces in responses | `server.error.include-message/stacktrace: never` |
+| Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
+| Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot |
+| Stray topics | Kafka `auto.create.topics.enable=false` |
+
+### Step B — after Phase 3: identity with Keycloak
+
+- Keycloak in compose (realm `stockrush`, imported from `infra/keycloak/`), its own Postgres database.
+- Both services become OAuth2 resource servers (Spring Security, JWT validation against the realm's JWKS).
+- The user id comes from the token's `sub` claim; `X-User-Id` is removed.
+- `/admin/**` requires the `admin` realm role; `GET /orders/{token}` and `pay` require the caller to own the order.
+- Rate limits apply per authenticated account; Nginx keeps the per-IP limit.
+
+### Step C — after Phase 4
+
+- Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
+- TLS at Nginx; Kafka SASL; Redis ACL users per service.
+- Dead-letter topic and retry with backoff for the consumer; Flyway migrations.
+- Containers run as non-root with read-only filesystems; image scanning in CI; branch protection on `main`.
+- Structured JSON logs with request ids; alerts on `flashsale_reconcile_mismatch_total`.
 
