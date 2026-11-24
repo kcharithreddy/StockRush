@@ -1,13 +1,29 @@
 server:
   port: ${PORT:8081}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
 
 spring:
   application:
     name: sale-service
+  config:
+    # Local runs read secrets from the repo's .env (from the repo root or the service folder).
+    # In Docker the same values arrive as real environment variables.
+    import:
+      - optional:file:.env[.properties]
+      - optional:file:../.env[.properties]
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: 6379
+      password: ${REDIS_PASSWORD}
+      # Fail fast: a buy request must never hang on a sick Redis.
+      timeout: 1s
+      connect-timeout: 1s
   kafka:
     bootstrap-servers: ${KAFKA:localhost:9092}
     producer:
@@ -24,10 +40,17 @@ spring:
         delivery.timeout.ms: 10000
 
 management:
+  # Health and metrics live on a separate port that is never published outside the Docker network.
+  server:
+    port: ${MANAGEMENT_PORT:9081}
   endpoints:
     web:
       exposure:
         include: health,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
   metrics:
     distribution:
       percentiles-histogram:

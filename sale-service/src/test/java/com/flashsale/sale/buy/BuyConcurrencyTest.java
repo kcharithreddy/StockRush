@@ -28,7 +28,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** 200 buyers race for 10 units against a real Redis: exactly 10 must win. */
-@SpringBootTest(properties = "spring.kafka.admin.auto-create=false")
+@SpringBootTest(properties = {"spring.kafka.admin.auto-create=false", "spring.data.redis.password="})
 @Testcontainers
 class BuyConcurrencyTest {
 
@@ -37,7 +37,7 @@ class BuyConcurrencyTest {
     private static final int BUYERS = 200;
 
     @Container
-    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
+    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4.12-alpine").withExposedPorts(6379);
 
     @DynamicPropertySource
     static void redisProperties(DynamicPropertyRegistry registry) {

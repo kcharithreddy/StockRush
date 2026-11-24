@@ -59,6 +59,9 @@ class SaleControllerTest {
 
         assertThat(controller.buy(1, null).getStatusCode().value()).isEqualTo(401);
         assertThat(controller.buy(1, "abc").getStatusCode().value()).isEqualTo(401);
+        assertThat(controller.buy(1, "0").getStatusCode().value()).isEqualTo(401);
+        assertThat(controller.buy(1, "-5").getStatusCode().value()).isEqualTo(401);
+        assertThat(controller.buy(1, "99999999999999999999").getStatusCode().value()).isEqualTo(401);
         verifyNoInteractions(buyService);
     }
 

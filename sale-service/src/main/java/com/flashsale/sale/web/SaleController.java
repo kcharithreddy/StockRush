@@ -2,6 +2,7 @@ package com.flashsale.sale.web;
 
 import com.flashsale.sale.buy.BuyResult;
 import com.flashsale.sale.buy.BuyService;
+import jakarta.validation.constraints.Positive;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,7 +22,7 @@ public class SaleController {
     }
 
     @PostMapping("/sales/{saleId}/buy")
-    public ResponseEntity<BuyResponse> buy(@PathVariable long saleId,
+    public ResponseEntity<BuyResponse> buy(@PathVariable @Positive long saleId,
                                            @RequestHeader(value = UserIds.HEADER, required = false) String userHeader) {
         OptionalLong userId = UserIds.parse(userHeader);
         if (userId.isEmpty()) {

@@ -20,6 +20,12 @@ public class RedisConfig {
         return RedisScript.of(new ClassPathResource("scripts/buy.lua"), Long.class);
     }
 
+    /** Atomic INCR + EXPIRE for the per-user rate limiter. */
+    @Bean
+    public RedisScript<Long> rateLimitScript() {
+        return RedisScript.of(new ClassPathResource("scripts/rate_limit.lua"), Long.class);
+    }
+
     @Bean
     public NewTopic orderCreatedTopic() {
         return TopicBuilder.name(ORDER_CREATED_TOPIC).partitions(3).replicas(1).build();
