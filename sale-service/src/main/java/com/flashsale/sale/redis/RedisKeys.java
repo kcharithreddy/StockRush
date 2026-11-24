@@ -1,6 +1,6 @@
 package com.flashsale.sale.redis;
 
-/** Redis key names, see CLAUDE.md §6. Must match order-service. */
+/** Redis key names, see ARCHITECTURE.md §6. Must match order-service. */
 public final class RedisKeys {
 
     private RedisKeys() {
