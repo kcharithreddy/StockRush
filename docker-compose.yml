@@ -1,28 +1,39 @@
 name: stockrush
 
+# Secrets come from .env (copy .env.example, never commit .env).
+# Every published port is bound to 127.0.0.1: nothing here is reachable from other machines.
+
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.16
     environment:
-      POSTGRES_USER: flash
-      POSTGRES_PASSWORD: flash
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: flashsale
+      # Least-privilege role the services connect as (created by infra/db-init/02-app-user.sh).
+      APP_DB_USER: ${DB_USER:?set DB_USER in .env}
+      APP_DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - ./infra/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./infra/db-init/02-app-user.sh:/docker-entrypoint-initdb.d/02-app-user.sh:ro
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flash -d flashsale"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d flashsale"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    image: redis:7.4.12-alpine
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      # Lets `docker compose exec redis redis-cli` authenticate without typing the password.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -34,7 +45,7 @@ services:
   kafka:
     image: apache/kafka:3.8.0
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -49,6 +60,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_DEFAULT_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly (NewTopic bean), never by a stray producer or consumer.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
