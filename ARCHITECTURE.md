@@ -73,7 +73,7 @@ Grafana :3000 reads Prometheus
 
 ```
 flash-sale-system/
-├── CLAUDE.md
+├── ARCHITECTURE.md
 ├── README.md
 ├── docker-compose.yml
 ├── infra/
