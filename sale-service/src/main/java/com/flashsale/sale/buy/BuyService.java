@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flashsale.sale.config.RedisConfig;
 import com.flashsale.sale.redis.RedisKeys;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -14,7 +16,9 @@ import org.springframework.kafka.support.SendResult;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -34,19 +38,33 @@ public class BuyService {
     private final RedisScript<Long> buyScript;
     private final KafkaTemplate<String, String> kafka;
     private final ObjectMapper json;
+    /** flashsale_buy_total{result=...}, one counter per outcome, registered up front so every series exists at 0. */
+    private final Map<BuyOutcome, Counter> buyCounters = new EnumMap<>(BuyOutcome.class);
 
     /** Sales this instance has seen sell out; lets it answer 410 without a Redis call. */
     private final Set<Long> soldOut = ConcurrentHashMap.newKeySet();
 
     public BuyService(StringRedisTemplate redis, @Qualifier("buyScript") RedisScript<Long> buyScript,
-                      KafkaTemplate<String, String> kafka, ObjectMapper json) {
+                      KafkaTemplate<String, String> kafka, ObjectMapper json, MeterRegistry meters) {
         this.redis = redis;
         this.buyScript = buyScript;
         this.kafka = kafka;
         this.json = json;
+        for (BuyOutcome outcome : BuyOutcome.values()) {
+            buyCounters.put(outcome, Counter.builder("flashsale.buy")
+                    .description("Buy attempts by outcome")
+                    .tag("result", outcome.name())
+                    .register(meters));
+        }
     }
 
     public BuyResult buy(long saleId, long userId) {
+        BuyResult result = attempt(saleId, userId);
+        buyCounters.get(result.outcome()).increment();
+        return result;
+    }
+
+    private BuyResult attempt(long saleId, long userId) {
         if (soldOut.contains(saleId)) {
             return BuyResult.of(BuyOutcome.SOLD_OUT);
         }

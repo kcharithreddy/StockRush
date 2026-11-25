@@ -2,6 +2,7 @@ package com.flashsale.order;
 
 import com.flashsale.order.order.InvalidEventException;
 import com.flashsale.order.order.OrderConsumer;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -29,14 +30,19 @@ class OrderConsumerTest extends IntegrationTest {
         assertThat(statusOf(UUID.fromString(token))).isEqualTo("PENDING_PAYMENT");
     }
 
+    @Autowired
+    MeterRegistry meters;
+
     @Test
     void redeliveredEventIsIgnored() {
         String payload = event(UUID.randomUUID().toString(), 1, 42);
+        double createdBefore = meters.get("flashsale.orders.placed").counter().count();
 
         consumer.onOrderCreated(payload);
         consumer.onOrderCreated(payload);
 
         assertThat(countOrders()).isEqualTo(1);
+        assertThat(meters.get("flashsale.orders.placed").counter().count()).isEqualTo(createdBefore + 1);
     }
 
     @Test

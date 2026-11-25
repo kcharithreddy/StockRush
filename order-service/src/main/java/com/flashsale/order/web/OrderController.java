@@ -1,5 +1,6 @@
 package com.flashsale.order.web;
 
+import com.flashsale.order.order.OrderMetrics;
 import com.flashsale.order.order.OrderStore;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -22,9 +23,11 @@ import java.util.UUID;
 public class OrderController {
 
     private final OrderStore orders;
+    private final OrderMetrics metrics;
 
-    public OrderController(OrderStore orders) {
+    public OrderController(OrderStore orders, OrderMetrics metrics) {
         this.orders = orders;
+        this.metrics = metrics;
     }
 
     @GetMapping("/{token}")
@@ -48,6 +51,7 @@ public class OrderController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
         if (orders.pay(token, userId.getAsLong())) {
+            metrics.paid();
             return ResponseEntity.ok(new OrderStatusResponse("PAID"));
         }
         return ResponseEntity.status(HttpStatus.CONFLICT).body(new OrderStatusResponse("NOT_PAYABLE"));

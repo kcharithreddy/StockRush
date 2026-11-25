@@ -28,8 +28,10 @@ class JobsTest extends IntegrationTest {
         UUID overdue2 = insertOrder(1, 2, "PENDING_PAYMENT", 11);
         UUID fresh = insertOrder(1, 3, "PENDING_PAYMENT", 2);
         UUID paid = insertOrder(1, 4, "PAID", 30);
+        double expiredBefore = meters.get("flashsale.orders.expired").counter().count();
 
         assertThat(expiry.expireOverdue()).isEqualTo(2);
+        assertThat(meters.get("flashsale.orders.expired").counter().count()).isEqualTo(expiredBefore + 2);
 
         assertThat(statusOf(overdue)).isEqualTo("CANCELLED");
         assertThat(statusOf(overdue2)).isEqualTo("CANCELLED");

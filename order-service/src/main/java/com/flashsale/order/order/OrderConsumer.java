@@ -22,10 +22,12 @@ public class OrderConsumer {
 
     private final OrderStore orders;
     private final ObjectMapper json;
+    private final OrderMetrics metrics;
 
-    public OrderConsumer(OrderStore orders, ObjectMapper json) {
+    public OrderConsumer(OrderStore orders, ObjectMapper json, OrderMetrics metrics) {
         this.orders = orders;
         this.json = json;
+        this.metrics = metrics;
     }
 
     @KafkaListener(topics = KafkaConfig.ORDER_CREATED_TOPIC, concurrency = "3")
@@ -34,6 +36,7 @@ public class OrderConsumer {
         UUID token = parseToken(event.orderToken());
 
         if (orders.insertPending(token, event.saleId(), event.userId())) {
+            metrics.created();
             log.debug("Created order {} for user {} in sale {}", token, event.userId(), event.saleId());
         } else {
             log.info("Duplicate order-created event ignored: token={} sale={} user={}",

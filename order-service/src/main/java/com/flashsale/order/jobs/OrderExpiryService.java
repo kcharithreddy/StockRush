@@ -1,5 +1,6 @@
 package com.flashsale.order.jobs;
 
+import com.flashsale.order.order.OrderMetrics;
 import com.flashsale.order.order.OrderStore;
 import com.flashsale.order.redis.RedisKeys;
 import org.slf4j.Logger;
@@ -27,12 +28,14 @@ public class OrderExpiryService {
     private final OrderStore orders;
     private final StringRedisTemplate redis;
     private final int timeoutMinutes;
+    private final OrderMetrics metrics;
 
-    public OrderExpiryService(OrderStore orders, StringRedisTemplate redis,
+    public OrderExpiryService(OrderStore orders, StringRedisTemplate redis, OrderMetrics metrics,
                               @Value("${orders.payment-timeout-minutes}") int timeoutMinutes) {
         this.orders = orders;
         this.redis = redis;
         this.timeoutMinutes = timeoutMinutes;
+        this.metrics = metrics;
     }
 
     /** Returns how many orders were cancelled. */
@@ -45,6 +48,7 @@ public class OrderExpiryService {
                 redis.opsForValue().increment(RedisKeys.stock(saleId));
             }
             total += saleIds.size();
+            metrics.expired(saleIds.size());
         } while (saleIds.size() == BATCH_SIZE);
 
         if (total > 0) {
