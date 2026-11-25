@@ -1,4 +1,10 @@
 version: 2
+
+# Versions pinned by ARCHITECTURE.md §2 (Spring Boot 3, Kafka 3.8, Postgres 16, Redis 7) only
+# receive updates inside that line. Moving to a new major is a deliberate decision, not a bot PR.
+# The Maven distribution and wrapper are pinned by checksum, so they are upgraded by hand
+# (download, verify Apache's SHA-512, update distributionSha256Sum).
+
 updates:
   - package-ecosystem: maven
     directory: /sale-service
@@ -7,10 +13,11 @@ updates:
     groups:
       spring:
         patterns: ["org.springframework*"]
-    # Stay on Spring Boot 3.x (ARCHITECTURE.md §2); major upgrades are a deliberate decision.
     ignore:
       - dependency-name: "org.springframework.boot:*"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "org.apache.maven:apache-maven"
+      - dependency-name: "org.apache.maven.wrapper:maven-wrapper"
 
   - package-ecosystem: maven
     directory: /order-service
@@ -22,11 +29,21 @@ updates:
     ignore:
       - dependency-name: "org.springframework.boot:*"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "org.apache.maven:apache-maven"
+      - dependency-name: "org.apache.maven.wrapper:maven-wrapper"
 
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Kafka stays on 3.8.x (patch releases only).
+      - dependency-name: "apache/kafka"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "redis"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
