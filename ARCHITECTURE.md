@@ -84,14 +84,18 @@ flash-sale-system/
 │   ├── schema.sql
 │   ├── db-init/02-app-user.sh   # least-privilege DB role
 │   ├── nginx.conf
-│   └── prometheus.yml
+│   ├── nginx-ratelimit.conf     # per-IP limit, included by nginx.conf
+│   ├── prometheus.yml
+│   └── grafana/                 # provisioned datasource + dashboard
 ├── sale-service/            # Spring Boot app, package com.flashsale.sale
 │   ├── Dockerfile
 │   └── src/main/resources/scripts/buy.lua
 ├── order-service/           # Spring Boot app, package com.flashsale.order
 │   └── Dockerfile
+├── docker-compose.loadtest.yml  # override: per-IP limit off for k6
 ├── loadtest/
-│   └── flash-sale.js
+│   ├── flash-sale.js
+│   └── nginx-no-ratelimit.conf
 └── docs/                    # load test results, Grafana screenshots
 ```
 
@@ -269,8 +273,8 @@ Every 60 s, for each sale currently within its window: `expected = total_stock �
 ## 11. Rate limiting
 
 - **Per user (sale-service):** `HandlerInterceptor` on `/sales/*/buy`. Fixed window: `INCR rl:{userId}:{epochSecond}`, `EXPIRE 2` on first hit (both in `scripts/rate_limit.lua`, so they are atomic), reject with 429 above 5.
-- **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The limit applies to the buy route only. The README must say to comment out the `limit_req` line for k6 runs (all k6 traffic is one IP).
-- **Nginx routing (`infra/nginx.conf`):** `POST /sales/{id}/buy` and `GET /sales/{id}/stock` go round-robin to `sale-1`/`sale-2`; `/orders/{uuid}` and `/orders/{uuid}/pay` go to order-service; every other path (including `/admin/**` and `/actuator/**`) is 404. Upstreams use Docker DNS with `resolve`, so Nginx keeps running while an instance is down. A failed connect is retried on the other instance, but a request that reached an instance is never resent, so a buy is never sent twice.
+- **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The limit applies to the buy route only and lives in `infra/nginx-ratelimit.conf`, which `nginx.conf` includes. For k6 runs (all k6 traffic is one IP) either comment out its `limit_req` line, or start Nginx with `docker-compose.loadtest.yml`, which mounts the empty `loadtest/nginx-no-ratelimit.conf` in its place.
+- **Nginx routing (`infra/nginx.conf`):** `POST /sales/{id}/buy` and `GET /sales/{id}/stock` go round-robin to `sale-1`/`sale-2`; `/orders/{uuid}` and `/orders/{uuid}/pay` go to order-service; every other path (including `/admin/**` and `/actuator/**`) is 404. Upstreams use Docker DNS with `resolve`, so Nginx keeps running while an instance is down. Upstream connections are reused (`keepalive 512`, `keepalive_requests 100000`); an instance is skipped for 5 s after 3 failed connects (2 s connect timeout), so a burst cannot take both out of rotation. A failed connect is retried on the other instance, but a request that reached an instance is never resent, so a buy is never sent twice.
 
 ## 12. Configuration
 
@@ -287,6 +291,8 @@ Each service reads env vars with local defaults so it runs from the IDE AND in D
 | `DB_USER` / `DB_PASSWORD` | — | from `.env` | from `.env` |
 | `RESET_ENABLED` | — | false | from `.env` |
 
+Both services: Tomcat `accept-count: 1000`, `max-keep-alive-requests: 100000`, `keep-alive-timeout: 60s`, so a burst queues instead of being dropped and Nginx's upstream connections stay open.
+
 Secrets have no defaults: a service refuses to start without them. Locally each service imports the repo's `.env` (`spring.config.import: optional:file:.env[.properties]` and `../.env`); in Docker compose passes the same values as environment variables. Compose binds every published port to `127.0.0.1`. Redis and Lettuce use a 1 s command and connect timeout.
 
 Kafka listeners in compose: `INTERNAL://kafka:29092` (containers), `EXTERNAL://localhost:9092` (host), `CONTROLLER://:9093`; `KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL`; all replication factors 1.
@@ -296,8 +302,10 @@ Both services: Actuator with `health,prometheus` exposed on the separate `MANAGE
 ## 13. Metrics
 
 - `flashsale_buy_total{result="SUCCESS|SOLD_OUT|ALREADY_BOUGHT|NOT_ACTIVE|TRY_AGAIN"}` (sale-service)
-- `flashsale_orders_created_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service)
+- `flashsale_orders_placed_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service). The spec originally said `flashsale_orders_created_total`, but the Prometheus client strips a trailing `_created` (an OpenMetrics reserved suffix), so that name cannot be exported.
 - `flashsale_reconcile_mismatch_total{direction}` (order-service)
+
+Prometheus (`infra/prometheus.yml`) scrapes `sale-1:9080`, `sale-2:9080` and `order-service:9091` every 5 s. Grafana provisions the datasource and the **StockRush — Flash Sale** dashboard from `infra/grafana/`. Its stat panels count exactly within the selected time range (`max_over_time − min_over_time`), not with `increase()`, whose extrapolation would show e.g. 313 for 300 orders.
 
 Grafana panels (document the PromQL in README):
 
@@ -367,7 +375,9 @@ docker compose up -d                      # start everything
 (cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build              # rebuild services after code changes
 curl -X POST localhost:8090/admin/sales/1/reset
-k6 run loadtest/flash-sale.js
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx   # per-IP limit off
+k6 run loadtest/flash-sale.js             # or: docker run --rm -i --network host -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
+docker compose up -d nginx                # per-IP limit back on
 docker compose exec postgres psql -U postgres -d flashsale
 docker compose exec redis redis-cli     # authenticates via REDISCLI_AUTH
 docker compose down -v                    # wipe data (needed after changing DB passwords)
@@ -397,6 +407,7 @@ docker compose down -v                    # wipe data (needed after changing DB 
 | Internal endpoints reachable from outside | Nginx routes only `/sales/*` and `/orders/*`; sale containers are not published; order-service on `127.0.0.1` only |
 | Slow or oversized requests | Nginx: 1 KB body limit, 5 s header/body timeouts, 1 s upstream connect timeout |
 | Reading or paying someone else's order | `/orders` queries filter on the caller's user id |
+| Monitoring exposed | Prometheus and Grafana bound to `127.0.0.1`; Grafana admin password from `.env`, sign-up, anonymous access and phone-home analytics off |
 
 ### Step B — after Phase 3: identity with Keycloak
 
