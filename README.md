@@ -10,13 +10,21 @@ Requires Docker and Java 17+.
 
 ```bash
 cp .env.example .env        # then change the passwords in .env
-docker compose up -d        # Postgres, Redis, Kafka (bound to 127.0.0.1 only)
-(cd order-service && ./mvnw -DskipTests package && java -jar target/order-service-0.0.1-SNAPSHOT.jar) &
-(cd sale-service  && ./mvnw -DskipTests package && java -jar target/sale-service-0.0.1-SNAPSHOT.jar) &
-
-curl -X POST localhost:8090/admin/sales/1/warmup
-curl -X POST -H "X-User-Id: 1" localhost:8081/sales/1/buy
+(cd sale-service && ./mvnw -DskipTests package)
+(cd order-service && ./mvnw -DskipTests package)
+docker compose up -d --build
 ```
+
+Everything goes through Nginx on port 8080:
+
+```bash
+curl -X POST localhost:8090/admin/sales/1/warmup                 # admin: host only
+curl -X POST -H "X-User-Id: 1" localhost:8080/sales/1/buy         # → orderToken
+curl -H "X-User-Id: 1" localhost:8080/orders/<orderToken>
+curl -X POST -H "X-User-Id: 1" localhost:8080/orders/<orderToken>/pay
+```
+
+For load tests (k6 or the race test), comment out the `limit_req` line in `infra/nginx.conf` and run `docker compose restart nginx`: all of that traffic comes from one IP.
 
 ## Security
 
