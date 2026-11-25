@@ -1,7 +1,43 @@
 name: stockrush
 
 # Secrets come from .env (copy .env.example, never commit .env).
-# Every published port is bound to 127.0.0.1: nothing here is reachable from other machines.
+# Only Nginx is published on all interfaces; everything else is bound to 127.0.0.1 or not published.
+# Build the jars before `docker compose up --build`:
+#   (cd sale-service && ./mvnw -DskipTests package) && (cd order-service && ./mvnw -DskipTests package)
+
+x-app-hardening: &app-hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  mem_limit: 512m
+  stop_grace_period: 25s
+
+x-sale-service: &sale-service
+  <<: *app-hardening
+  build: ./sale-service
+  image: stockrush/sale-service:local
+  environment:
+    PORT: 8080
+    MANAGEMENT_PORT: 9080
+    REDIS_HOST: redis
+    REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    KAFKA: kafka:29092
+  depends_on:
+    redis:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:9080/actuator/health/readiness"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 20s
 
 services:
   postgres:
@@ -68,6 +104,63 @@ services:
       timeout: 10s
       retries: 20
       start_period: 15s
+
+  sale-1:
+    <<: *sale-service
+
+  sale-2:
+    <<: *sale-service
+
+  order-service:
+    <<: *app-hardening
+    build: ./order-service
+    image: stockrush/order-service:local
+    environment:
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      KAFKA: kafka:29092
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:?set DB_USER in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      RESET_ENABLED: ${RESET_ENABLED:-false}
+      ORDERS_PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-10}
+    ports:
+      # Admin endpoints live here and are unauthenticated until Step B: host only.
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9091/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  nginx:
+    image: nginx:1.27.5-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      sale-1:
+        condition: service_healthy
+      sale-2:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
 
 volumes:
   pgdata:
