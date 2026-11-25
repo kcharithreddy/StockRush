@@ -1,7 +1,43 @@
 name: stockrush
 
 # Secrets come from .env (copy .env.example, never commit .env).
-# Every published port is bound to 127.0.0.1: nothing here is reachable from other machines.
+# Only Nginx is published on all interfaces; everything else is bound to 127.0.0.1 or not published.
+# Build the jars before `docker compose up --build`:
+#   (cd sale-service && ./mvnw -DskipTests package) && (cd order-service && ./mvnw -DskipTests package)
+
+x-app-hardening: &app-hardening
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  mem_limit: 512m
+  stop_grace_period: 25s
+
+x-sale-service: &sale-service
+  <<: *app-hardening
+  build: ./sale-service
+  image: stockrush/sale-service:local
+  environment:
+    PORT: 8080
+    MANAGEMENT_PORT: 9080
+    REDIS_HOST: redis
+    REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    KAFKA: kafka:29092
+  depends_on:
+    redis:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:9080/actuator/health/readiness"]
+    interval: 5s
+    timeout: 3s
+    retries: 30
+    start_period: 20s
 
 services:
   postgres:
@@ -69,6 +105,106 @@ services:
       retries: 20
       start_period: 15s
 
+  sale-1:
+    <<: *sale-service
+
+  sale-2:
+    <<: *sale-service
+
+  order-service:
+    <<: *app-hardening
+    build: ./order-service
+    image: stockrush/order-service:local
+    environment:
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      KAFKA: kafka:29092
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:?set DB_USER in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      RESET_ENABLED: ${RESET_ENABLED:-false}
+      ORDERS_PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-10}
+    ports:
+      # Admin endpoints live here and are unauthenticated until Step B: host only.
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9091/actuator/health/readiness"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  nginx:
+    image: nginx:1.27.5-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
+    depends_on:
+      sale-1:
+        condition: service_healthy
+      sale-2:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - sale-1
+      - sale-2
+      - order-service
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/stockrush.json
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
   redisdata:
+  promdata:
+  grafanadata:

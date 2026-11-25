@@ -1,6 +1,7 @@
 package com.flashsale.sale.buy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.core.SetOperations;
@@ -36,12 +37,14 @@ class BuyServiceTest {
     private final KafkaTemplate<String, String> kafka = mock(KafkaTemplate.class);
 
     private BuyService service;
+    private SimpleMeterRegistry meters;
 
     @BeforeEach
     void setUp() {
         when(redis.opsForValue()).thenReturn(values);
         when(redis.opsForSet()).thenReturn(sets);
-        service = new BuyService(redis, script, kafka, new ObjectMapper());
+        meters = new SimpleMeterRegistry();
+        service = new BuyService(redis, script, kafka, new ObjectMapper(), meters);
     }
 
     private void luaReturns(long result) {
@@ -137,5 +140,19 @@ class BuyServiceTest {
 
         verify(values, never()).increment(anyString());
         verify(sets, never()).remove(anyString(), any());
+    }
+
+    @Test
+    void countsEveryOutcome() {
+        luaReturns(-1);
+        service.buy(SALE, USER);
+        service.buy(SALE, USER);
+        luaReturns(0);
+        service.buy(SALE, USER);
+        service.buy(SALE, USER); // answered from the local sold-out flag, still counted
+
+        assertThat(meters.get("flashsale.buy").tag("result", "ALREADY_BOUGHT").counter().count()).isEqualTo(2);
+        assertThat(meters.get("flashsale.buy").tag("result", "SOLD_OUT").counter().count()).isEqualTo(2);
+        assertThat(meters.get("flashsale.buy").tag("result", "SUCCESS").counter().count()).isZero();
     }
 }

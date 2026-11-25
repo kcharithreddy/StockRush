@@ -1,0 +1,70 @@
+package com.flashsale.order.order;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.flashsale.order.config.KafkaConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Component;
+
+import java.util.UUID;
+
+/**
+ * Turns order-created events into PENDING_PAYMENT rows. Delivery is at-least-once, so the insert
+ * is idempotent (ON CONFLICT DO NOTHING). Malformed events are rejected without retrying;
+ * database errors are retried with backoff by {@link KafkaConfig#kafkaErrorHandler()}.
+ */
+@Component
+public class OrderConsumer {
+
+    private static final Logger log = LoggerFactory.getLogger(OrderConsumer.class);
+
+    private final OrderStore orders;
+    private final ObjectMapper json;
+    private final OrderMetrics metrics;
+
+    public OrderConsumer(OrderStore orders, ObjectMapper json, OrderMetrics metrics) {
+        this.orders = orders;
+        this.json = json;
+        this.metrics = metrics;
+    }
+
+    @KafkaListener(topics = KafkaConfig.ORDER_CREATED_TOPIC, concurrency = "3")
+    public void onOrderCreated(String payload) {
+        OrderCreatedEvent event = parse(payload);
+        UUID token = parseToken(event.orderToken());
+
+        if (orders.insertPending(token, event.saleId(), event.userId())) {
+            metrics.created();
+            log.debug("Created order {} for user {} in sale {}", token, event.userId(), event.saleId());
+        } else {
+            log.info("Duplicate order-created event ignored: token={} sale={} user={}",
+                    token, event.saleId(), event.userId());
+        }
+    }
+
+    private OrderCreatedEvent parse(String payload) {
+        if (payload == null || payload.isBlank()) {
+            throw new InvalidEventException("Empty order-created payload");
+        }
+        OrderCreatedEvent event;
+        try {
+            event = json.readValue(payload, OrderCreatedEvent.class);
+        } catch (JsonProcessingException e) {
+            throw new InvalidEventException("Malformed order-created payload", e);
+        }
+        if (event.saleId() <= 0 || event.userId() <= 0) {
+            throw new InvalidEventException("Invalid ids in " + event);
+        }
+        return event;
+    }
+
+    private static UUID parseToken(String token) {
+        try {
+            return UUID.fromString(token);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            throw new InvalidEventException("Invalid order token: " + token, e);
+        }
+    }
+}

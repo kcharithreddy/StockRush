@@ -33,7 +33,7 @@ No Lombok. Use Java records for DTOs/events. Use `JdbcTemplate` for the hot path
 Users / k6
    │
    ▼
-Nginx :8080  ── per-IP rate limit, round-robin
+Nginx :8080  ── per-IP rate limit on buy, round-robin; routes only /sales/* and /orders/*
    │
    ├──► sale-1 :8080 (container)  ┐  sale-service (stateless, 2 instances)
    └──► sale-2 :8080 (container)  ┘  - per-user rate limit (Redis)
@@ -68,7 +68,7 @@ Grafana :3000 reads Prometheus
 ### 3.2 order-service
 
 - Owns PostgreSQL. Consumes Kafka. Writes to Redis only for warm-up, reset, and stock restore.
-- Single instance (note in README: scaling it needs `FOR UPDATE SKIP LOCKED` in the timeout worker).
+- Runs as a single instance today. The timeout worker already uses `FOR UPDATE SKIP LOCKED`, so more instances could share it; the consumer scales with the topic's 3 partitions.
 
 ## 4. Repository layout
 
@@ -84,14 +84,18 @@ flash-sale-system/
 │   ├── schema.sql
 │   ├── db-init/02-app-user.sh   # least-privilege DB role
 │   ├── nginx.conf
-│   └── prometheus.yml
+│   ├── nginx-ratelimit.conf     # per-IP limit, included by nginx.conf
+│   ├── prometheus.yml
+│   └── grafana/                 # provisioned datasource + dashboard
 ├── sale-service/            # Spring Boot app, package com.flashsale.sale
 │   ├── Dockerfile
 │   └── src/main/resources/scripts/buy.lua
 ├── order-service/           # Spring Boot app, package com.flashsale.order
 │   └── Dockerfile
+├── docker-compose.loadtest.yml  # override: per-IP limit off for k6
 ├── loadtest/
-│   └── flash-sale.js
+│   ├── flash-sale.js
+│   └── nginx-no-ratelimit.conf
 └── docs/                    # load test results, Grafana screenshots
 ```
 
@@ -204,10 +208,12 @@ User identity is a mock header `X-User-Id: <long>` (README notes that production
 
 | Method & path | Behaviour |
 | :---- | :---- |
-| `GET /orders/{token}` | `{"status": "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "PROCESSING"}` — PROCESSING if no row yet |
-| `POST /orders/{token}/pay` | `UPDATE ... SET status='PAID' WHERE order_token=? AND status='PENDING_PAYMENT'`; 200 `{"status":"PAID"}` if 1 row, else 409 `{"status":"NOT_PAYABLE"}` |
+| `GET /orders/{token}` | `{"status": "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "PROCESSING"}` — PROCESSING if the caller has no such order (yet) |
+| `POST /orders/{token}/pay` | `UPDATE ... SET status='PAID' WHERE order_token=? AND user_id=? AND status='PENDING_PAYMENT'`; 200 `{"status":"PAID"}` if 1 row, else 409 `{"status":"NOT_PAYABLE"}` |
 | `POST /admin/sales/{id}/warmup` | stock in Redis = total_stock − count(orders PENDING_PAYMENT or PAID); sets `window`; returns `{"saleId","stock"}` |
 | `POST /admin/sales/{id}/reset` | TEST ONLY: delete the sale's orders, delete `stock` and `buyers` keys, then warm-up. Exists only when `RESET_ENABLED=true`; otherwise 404 |
+
+Both `/orders` endpoints require `X-User-Id` (401 otherwise) and only ever see the caller's own orders: another user's token behaves exactly like an unknown one. A token that is not a UUID is 400. Nginx exposes `/orders/*` and `/sales/*` on :8080 and nothing else.
 
 Admin endpoints are not authenticated until Step B of §17 (Keycloak `admin` role). Until then order-service must never be published beyond `127.0.0.1` or the Docker network.
 
@@ -232,17 +238,30 @@ VALUES (?, ?, ?, 'PENDING_PAYMENT')
 ON CONFLICT DO NOTHING
 ```
 
+The listener runs 3 consumers (one per partition). Errors are handled by `KafkaConfig.kafkaErrorHandler`:
+
+- Transient failures (database down) are retried with exponential backoff — 0.5 s doubling to 30 s, for up to 5 minutes.
+- Records that can never succeed (malformed JSON, bad ids or token, unknown sale) are logged and skipped at once, so one bad record cannot block a partition. Step C replaces the skip with a dead-letter topic.
+
 ### Payment timeout (order-service `PaymentTimeoutWorker`)
 
-Every 10 s, in one `@Transactional` method:
+Every 10 s, in batches of 500, one atomic statement per batch:
 
 ```sql
-UPDATE orders SET status='CANCELLED', updated_at=now()
-WHERE status='PENDING_PAYMENT' AND created_at < now() - make_interval(mins => ?)
-RETURNING sale_id
+WITH due AS (
+  SELECT id FROM orders
+  WHERE status='PENDING_PAYMENT' AND created_at < now() - make_interval(mins => ?)
+  ORDER BY created_at LIMIT ?
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE orders o SET status='CANCELLED', updated_at=now()
+FROM due WHERE o.id = due.id AND o.status='PENDING_PAYMENT'
+RETURNING o.sale_id
 ```
 
-For each returned row: `INCR sale:{saleId}:stock`. Timeout is `orders.payment-timeout-minutes` (default 10; use 1 when testing).
+Only after that statement has committed: `INCR sale:{saleId}:stock` for each returned row. If the process dies in between, Redis ends up one unit low, which can lose a sale but never oversell; reconciliation reports it as `redis_low`. Incrementing before the commit would risk the opposite.
+
+The timeout is `orders.payment-timeout-minutes` (`PAYMENT_TIMEOUT_MINUTES` in `.env`; default 10, use 1 when testing). A pay and a cancel racing for the same order are both conditional on `status='PENDING_PAYMENT'`, so exactly one wins.
 
 ### Reconciliation (order-service `ReconciliationJob`)
 
@@ -254,7 +273,8 @@ Every 60 s, for each sale currently within its window: `expected = total_stock �
 ## 11. Rate limiting
 
 - **Per user (sale-service):** `HandlerInterceptor` on `/sales/*/buy`. Fixed window: `INCR rl:{userId}:{epochSecond}`, `EXPIRE 2` on first hit (both in `scripts/rate_limit.lua`, so they are atomic), reject with 429 above 5.
-- **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The README must say to comment this out for k6 runs (all k6 traffic is one IP).
+- **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The limit applies to the buy route only and lives in `infra/nginx-ratelimit.conf`, which `nginx.conf` includes. For k6 runs (all k6 traffic is one IP) either comment out its `limit_req` line, or start Nginx with `docker-compose.loadtest.yml`, which mounts the empty `loadtest/nginx-no-ratelimit.conf` in its place.
+- **Nginx routing (`infra/nginx.conf`):** `POST /sales/{id}/buy` and `GET /sales/{id}/stock` go round-robin to `sale-1`/`sale-2`; `/orders/{uuid}` and `/orders/{uuid}/pay` go to order-service; every other path (including `/admin/**` and `/actuator/**`) is 404. Upstreams use Docker DNS with `resolve`, so Nginx keeps running while an instance is down. Upstream connections are reused (`keepalive 512`, `keepalive_requests 100000`); an instance is skipped for 5 s after 3 failed connects (2 s connect timeout), so a burst cannot take both out of rotation. A failed connect is retried on the other instance, but a request that reached an instance is never resent, so a buy is never sent twice.
 
 ## 12. Configuration
 
@@ -271,6 +291,8 @@ Each service reads env vars with local defaults so it runs from the IDE AND in D
 | `DB_USER` / `DB_PASSWORD` | — | from `.env` | from `.env` |
 | `RESET_ENABLED` | — | false | from `.env` |
 
+Both services: Tomcat `accept-count: 1000`, `max-keep-alive-requests: 100000`, `keep-alive-timeout: 60s`, so a burst queues instead of being dropped and Nginx's upstream connections stay open.
+
 Secrets have no defaults: a service refuses to start without them. Locally each service imports the repo's `.env` (`spring.config.import: optional:file:.env[.properties]` and `../.env`); in Docker compose passes the same values as environment variables. Compose binds every published port to `127.0.0.1`. Redis and Lettuce use a 1 s command and connect timeout.
 
 Kafka listeners in compose: `INTERNAL://kafka:29092` (containers), `EXTERNAL://localhost:9092` (host), `CONTROLLER://:9093`; `KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL`; all replication factors 1.
@@ -280,8 +302,10 @@ Both services: Actuator with `health,prometheus` exposed on the separate `MANAGE
 ## 13. Metrics
 
 - `flashsale_buy_total{result="SUCCESS|SOLD_OUT|ALREADY_BOUGHT|NOT_ACTIVE|TRY_AGAIN"}` (sale-service)
-- `flashsale_orders_created_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service)
+- `flashsale_orders_placed_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service). The spec originally said `flashsale_orders_created_total`, but the Prometheus client strips a trailing `_created` (an OpenMetrics reserved suffix), so that name cannot be exported.
 - `flashsale_reconcile_mismatch_total{direction}` (order-service)
+
+Prometheus (`infra/prometheus.yml`) scrapes `sale-1:9080`, `sale-2:9080` and `order-service:9091` every 5 s. Grafana provisions the datasource and the **StockRush — Flash Sale** dashboard from `infra/grafana/`. Its stat panels count exactly within the selected time range (`max_over_time − min_over_time`), not with `increase()`, whose extrapolation would show e.g. 313 for 300 orders.
 
 Grafana panels (document the PromQL in README):
 
@@ -332,7 +356,7 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 - `OrderConsumer`, `OrderController` (status + pay), `PaymentTimeoutWorker`, `ReconciliationJob`.
 - Dockerfiles (`FROM eclipse-temurin:17-jre`, copy jar), compose services `sale-1`, `sale-2`, `order-service`, `nginx`; `infra/nginx.conf`.
 
-**Accept:** race test through `localhost:8080` (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3; with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
+**Accept:** race test through `localhost:8080` (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` with the owner's `X-User-Id`); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
 
 ### Phase 4 — Load test, monitoring, docs
 
@@ -351,7 +375,9 @@ docker compose up -d                      # start everything
 (cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build              # rebuild services after code changes
 curl -X POST localhost:8090/admin/sales/1/reset
-k6 run loadtest/flash-sale.js
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx   # per-IP limit off
+k6 run loadtest/flash-sale.js             # or: docker run --rm -i --network host -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
+docker compose up -d nginx                # per-IP limit back on
 docker compose exec postgres psql -U postgres -d flashsale
 docker compose exec redis redis-cli     # authenticates via REDISCLI_AUTH
 docker compose down -v                    # wipe data (needed after changing DB passwords)
@@ -377,13 +403,18 @@ docker compose down -v                    # wipe data (needed after changing DB 
 | Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
 | Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot |
 | Stray topics | Kafka `auto.create.topics.enable=false` |
+| Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |
+| Internal endpoints reachable from outside | Nginx routes only `/sales/*` and `/orders/*`; sale containers are not published; order-service on `127.0.0.1` only |
+| Slow or oversized requests | Nginx: 1 KB body limit, 5 s header/body timeouts, 1 s upstream connect timeout |
+| Reading or paying someone else's order | `/orders` queries filter on the caller's user id |
+| Monitoring exposed | Prometheus and Grafana bound to `127.0.0.1`; Grafana admin password from `.env`, sign-up, anonymous access and phone-home analytics off |
 
 ### Step B — after Phase 3: identity with Keycloak
 
 - Keycloak in compose (realm `stockrush`, imported from `infra/keycloak/`), its own Postgres database.
 - Both services become OAuth2 resource servers (Spring Security, JWT validation against the realm's JWKS).
 - The user id comes from the token's `sub` claim; `X-User-Id` is removed.
-- `/admin/**` requires the `admin` realm role; `GET /orders/{token}` and `pay` require the caller to own the order.
+- `/admin/**` requires the `admin` realm role. The order ownership check (already enforced on `X-User-Id`) moves to the token's subject.
 - Rate limits apply per authenticated account; Nginx keeps the per-IP limit.
 
 ### Step C — after Phase 4
@@ -391,6 +422,6 @@ docker compose down -v                    # wipe data (needed after changing DB 
 - Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
 - TLS at Nginx; Kafka SASL; Redis ACL users per service.
 - Dead-letter topic and retry with backoff for the consumer; Flyway migrations.
-- Containers run as non-root with read-only filesystems; image scanning in CI; branch protection on `main`.
+- Image scanning in CI; branch protection on `main`.
 - Structured JSON logs with request ids; alerts on `flashsale_reconcile_mismatch_total`.
 

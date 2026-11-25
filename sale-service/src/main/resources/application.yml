@@ -1,6 +1,12 @@
 server:
   port: ${PORT:8081}
   shutdown: graceful
+  tomcat:
+    # Room to queue a burst of new connections instead of dropping them.
+    accept-count: 1000
+    # Nginx keeps upstream connections open; do not force it to reconnect every 100 requests.
+    max-keep-alive-requests: 100000
+    keep-alive-timeout: 60s
   error:
     include-message: never
     include-stacktrace: never

@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Actuator runs on the internal management ports, which are never published.
+  - job_name: sale-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["sale-1:9080", "sale-2:9080"]
+
+  - job_name: order-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["order-service:9091"]

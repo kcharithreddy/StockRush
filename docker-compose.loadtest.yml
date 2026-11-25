@@ -1,0 +1,9 @@
+# Load-test override: turns off the per-IP rate limit in Nginx (all k6 traffic comes from one IP).
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx
+# Back to normal:
+#   docker compose up -d nginx
+services:
+  nginx:
+    volumes: !override
+      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./loadtest/nginx-no-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
