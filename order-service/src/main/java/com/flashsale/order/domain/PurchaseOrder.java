@@ -31,7 +31,7 @@ public class PurchaseOrder {
     private long saleId;
 
     @Column(name = "user_id", nullable = false)
-    private long userId;
+    private UUID userId;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, columnDefinition = "text")
@@ -58,7 +58,7 @@ public class PurchaseOrder {
         return saleId;
     }
 
-    public long getUserId() {
+    public UUID getUserId() {
         return userId;
     }
 

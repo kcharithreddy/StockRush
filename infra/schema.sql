@@ -17,7 +17,7 @@ CREATE TABLE orders (
   id          BIGSERIAL PRIMARY KEY,
   order_token UUID   NOT NULL UNIQUE,
   sale_id     BIGINT NOT NULL REFERENCES flash_sales(id),
-  user_id     BIGINT NOT NULL,
+  user_id     UUID   NOT NULL,   -- Keycloak subject (token "sub")
   status      TEXT   NOT NULL,   -- PENDING_PAYMENT | PAID | CANCELLED
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

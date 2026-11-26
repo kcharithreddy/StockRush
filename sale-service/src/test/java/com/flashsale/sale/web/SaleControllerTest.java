@@ -7,13 +7,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.oauth2.jwt.Jwt;
+
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /** Outcome → HTTP mapping, ARCHITECTURE.md §9. */
@@ -53,25 +56,14 @@ class SaleControllerTest {
     }
 
     @Test
-    void missingOrInvalidUserHeaderIs401() {
+    void buysAsTheTokenSubject() {
         BuyService buyService = mock(BuyService.class);
-        SaleController controller = new SaleController(buyService);
+        UUID user = UUID.randomUUID();
+        when(buyService.buy(anyLong(), any(UUID.class))).thenReturn(BuyResult.success("t"));
+        Jwt token = Jwt.withTokenValue("t").header("alg", "none").subject(user.toString()).build();
 
-        assertThat(controller.buy(1, null).getStatusCode().value()).isEqualTo(401);
-        assertThat(controller.buy(1, "abc").getStatusCode().value()).isEqualTo(401);
-        assertThat(controller.buy(1, "0").getStatusCode().value()).isEqualTo(401);
-        assertThat(controller.buy(1, "-5").getStatusCode().value()).isEqualTo(401);
-        assertThat(controller.buy(1, "99999999999999999999").getStatusCode().value()).isEqualTo(401);
-        verifyNoInteractions(buyService);
-    }
+        new SaleController(buyService).buy(1, token);
 
-    @Test
-    void passesUserIdToService() {
-        BuyService buyService = mock(BuyService.class);
-        when(buyService.buy(anyLong(), anyLong())).thenReturn(BuyResult.success("t"));
-
-        new SaleController(buyService).buy(1, "42");
-
-        verify(buyService).buy(1, 42);
+        verify(buyService).buy(1, user);
     }
 }

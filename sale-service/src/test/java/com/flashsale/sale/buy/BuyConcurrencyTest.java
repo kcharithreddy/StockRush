@@ -15,6 +15,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -70,7 +71,7 @@ class BuyConcurrencyTest {
         CountDownLatch start = new CountDownLatch(1);
         List<Future<BuyOutcome>> results = new ArrayList<>();
         for (int user = 1; user <= BUYERS; user++) {
-            long userId = user;
+            UUID userId = UUID.randomUUID();
             results.add(pool.submit(() -> {
                 start.await();
                 return buyService.buy(SALE, userId).outcome();

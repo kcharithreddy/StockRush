@@ -12,6 +12,7 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,7 +29,8 @@ import static org.mockito.Mockito.when;
 class BuyServiceTest {
 
     private static final long SALE = 1;
-    private static final long USER = 42;
+    private static final UUID USER = UUID.fromString("00000000-0000-4000-8000-000000000042");
+    private static final String USER_ID = USER.toString();
 
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
     private final ValueOperations<String, String> values = mock(ValueOperations.class);
@@ -64,9 +66,9 @@ class BuyServiceTest {
 
         assertThat(result.outcome()).isEqualTo(BuyOutcome.SUCCESS);
         assertThat(result.orderToken()).isNotBlank();
-        verify(redis).execute(script, List.of("sale:1:stock", "sale:1:buyers", "sale:1:window"), "42");
-        verify(kafka).send(eq("order-created"), eq("42"),
-                eq("{\"orderToken\":\"" + result.orderToken() + "\",\"saleId\":1,\"userId\":42}"));
+        verify(redis).execute(script, List.of("sale:1:stock", "sale:1:buyers", "sale:1:window"), USER_ID);
+        verify(kafka).send(eq("order-created"), eq(USER_ID),
+                eq("{\"orderToken\":\"" + result.orderToken() + "\",\"saleId\":1,\"userId\":\"" + USER_ID + "\"}"));
     }
 
     @Test
@@ -74,7 +76,7 @@ class BuyServiceTest {
         luaReturns(0);
 
         assertThat(service.buy(SALE, USER).outcome()).isEqualTo(BuyOutcome.SOLD_OUT);
-        assertThat(service.buy(SALE, 43).outcome()).isEqualTo(BuyOutcome.SOLD_OUT);
+        assertThat(service.buy(SALE, UUID.randomUUID()).outcome()).isEqualTo(BuyOutcome.SOLD_OUT);
 
         verify(redis, times(1)).execute(eq(script), any(List.class), any());
         service.clearSoldOutFlags();
@@ -100,7 +102,7 @@ class BuyServiceTest {
         assertThat(service.buy(SALE, USER).outcome()).isEqualTo(BuyOutcome.TRY_AGAIN);
 
         verify(values).increment("sale:1:stock");
-        verify(sets).remove("sale:1:buyers", "42");
+        verify(sets).remove("sale:1:buyers", USER_ID);
     }
 
     @Test
@@ -111,7 +113,7 @@ class BuyServiceTest {
         assertThat(service.buy(SALE, USER).outcome()).isEqualTo(BuyOutcome.TRY_AGAIN);
 
         verify(values).increment("sale:1:stock");
-        verify(sets).remove("sale:1:buyers", "42");
+        verify(sets).remove("sale:1:buyers", USER_ID);
     }
 
     @Test
@@ -126,7 +128,7 @@ class BuyServiceTest {
         pending.completeExceptionally(new RuntimeException("delivery timeout"));
 
         verify(values).increment("sale:1:stock");
-        verify(sets).remove("sale:1:buyers", "42");
+        verify(sets).remove("sale:1:buyers", USER_ID);
     }
 
     @Test
