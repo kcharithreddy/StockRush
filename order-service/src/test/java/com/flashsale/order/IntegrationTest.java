@@ -9,12 +9,11 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.utility.MountableFile;
 
 import java.util.UUID;
 
 /**
- * Base for tests that need real PostgreSQL 16 (with infra/schema.sql) and Redis 7.
+ * Base for tests that need real PostgreSQL 16 (schema from infra/db/migration via Flyway) and Redis 7.
  * The containers start once and are shared by every test class.
  * Kafka listeners and the scheduled jobs are off: tests call the beans directly.
  */
@@ -24,14 +23,16 @@ import java.util.UUID;
         "flashsale.jobs.enabled=false",
         "flashsale.admin.reset-enabled=true",
         "spring.data.redis.password=",
-        com.flashsale.order.security.TestTokens.SECRET_PROPERTY
+        com.flashsale.order.security.TestTokens.SECRET_PROPERTY,
+        // The same migrations production applies; the container's own user stands in for the app role.
+        "spring.flyway.locations=filesystem:../infra/db/migration",
+        "spring.flyway.placeholders.app_user=test",
+        "spring.flyway.postgresql.transactional-lock=false"
 })
 public abstract class IntegrationTest {
 
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16.16")
-            .withDatabaseName("flashsale")
-            .withCopyFileToContainer(MountableFile.forHostPath("../infra/schema.sql"),
-                    "/docker-entrypoint-initdb.d/01-schema.sql");
+            .withDatabaseName("flashsale");
 
     static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4.12-alpine").withExposedPorts(6379);
 
