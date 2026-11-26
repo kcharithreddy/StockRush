@@ -8,7 +8,9 @@ public enum BuyOutcome {
     SOLD_OUT(HttpStatus.GONE, "SOLD_OUT"),
     ALREADY_BOUGHT(HttpStatus.CONFLICT, "ALREADY_BOUGHT"),
     NOT_ACTIVE(HttpStatus.FORBIDDEN, "SALE_NOT_ACTIVE"),
-    TRY_AGAIN(HttpStatus.SERVICE_UNAVAILABLE, "TRY_AGAIN");
+    TRY_AGAIN(HttpStatus.SERVICE_UNAVAILABLE, "TRY_AGAIN"),
+    /** The sale has a waiting room and this buyer has not been let in yet. */
+    NOT_ADMITTED(HttpStatus.FORBIDDEN, "NOT_ADMITTED");
 
     private final HttpStatus httpStatus;
     private final String responseStatus;
@@ -39,6 +41,9 @@ public enum BuyOutcome {
         }
         if (result == -2) {
             return NOT_ACTIVE;
+        }
+        if (result == -3) {
+            return NOT_ADMITTED;
         }
         throw new IllegalStateException("Unexpected buy.lua result: " + result);
     }

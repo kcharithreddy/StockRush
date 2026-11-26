@@ -80,7 +80,7 @@ class DeadLetterTest extends IntegrationTest {
 
         // Same key → same partition, in this order: garbage, an order for a sale that does not exist yet, a good order.
         kafka.send(KafkaConfig.ORDER_CREATED_TOPIC, key, "this is not json").get();
-        kafka.send(KafkaConfig.ORDER_CREATED_TOPIC, key, event(unknownSaleOrder, 2, user)).get();
+        kafka.send(KafkaConfig.ORDER_CREATED_TOPIC, key, event(unknownSaleOrder, 99, user)).get();
         kafka.send(KafkaConfig.ORDER_CREATED_TOPIC, key, event(goodOrder, 1, UUID.randomUUID())).get();
 
         // The good record behind the two bad ones is processed: the partition is not blocked.
@@ -89,7 +89,7 @@ class DeadLetterTest extends IntegrationTest {
 
         List<DeadLetterService.DeadLetter> parked = deadLetters.pending(10);
         assertThat(parked).extracting(DeadLetterService.DeadLetter::payload)
-                .containsExactly("this is not json", event(unknownSaleOrder, 2, user));
+                .containsExactly("this is not json", event(unknownSaleOrder, 99, user));
         assertThat(parked.get(0).error()).contains("InvalidEventException");
         assertThat(parked.get(1).error()).containsIgnoringCase("foreign key");
         assertThat(parked).allSatisfy(d -> {
@@ -103,7 +103,7 @@ class DeadLetterTest extends IntegrationTest {
         // Fix the cause (the sale now exists), then replay: the order is created and nothing is pending.
         jdbc.update("""
                 INSERT INTO flash_sales (id, product_id, total_stock, sale_price_paise, starts_at, ends_at)
-                VALUES (2, 1, 10, 100, now(), now() + interval '1 day')
+                VALUES (99, 1, 10, 100, now(), now() + interval '1 day')
                 """);
         assertThat(deadLetters.replayAll()).isEqualTo(2);
         await("replayed order to be written", () -> orderExists(unknownSaleOrder));
@@ -111,5 +111,13 @@ class DeadLetterTest extends IntegrationTest {
         // The garbage record cannot be fixed; replaying it sends it straight back, once.
         await("garbage to be parked again", () -> deadLetters.pending(10).size() == 1);
         assertThat(deadLetters.pending(10).get(0).payload()).isEqualTo("this is not json");
+    }
+
+    @Test
+    void deadLetterReasonsAreABoundedSetRegisteredAtZero() {
+        for (String reason : java.util.List.of("invalid_event", "integrity_violation", "undeserializable", "retries_exhausted")) {
+            assertThat(meters.find("flashsale.orders.dead.lettered").tag("reason", reason).counter())
+                    .as(reason).isNotNull();
+        }
     }
 }

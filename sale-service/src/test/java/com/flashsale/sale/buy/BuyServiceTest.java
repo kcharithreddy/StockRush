@@ -66,7 +66,7 @@ class BuyServiceTest {
 
         assertThat(result.outcome()).isEqualTo(BuyOutcome.SUCCESS);
         assertThat(result.orderToken()).isNotBlank();
-        verify(redis).execute(script, List.of("sale:1:stock", "sale:1:buyers", "sale:1:window"), USER_ID);
+        verify(redis).execute(script, List.of("sale:1:stock", "sale:1:buyers", "sale:1:window", "sale:1:gate", "sale:1:admitted"), USER_ID);
         verify(kafka).send(eq("order-created"), eq(USER_ID),
                 eq("{\"orderToken\":\"" + result.orderToken() + "\",\"saleId\":1,\"userId\":\"" + USER_ID + "\"}"));
     }

@@ -27,7 +27,8 @@ class SaleControllerTest {
             "SOLD_OUT,       410, SOLD_OUT",
             "ALREADY_BOUGHT, 409, ALREADY_BOUGHT",
             "NOT_ACTIVE,     403, SALE_NOT_ACTIVE",
-            "TRY_AGAIN,      503, TRY_AGAIN"
+            "TRY_AGAIN,      503, TRY_AGAIN",
+            "NOT_ADMITTED,   403, NOT_ADMITTED"
     })
     void mapsFailureOutcomes(BuyOutcome outcome, int httpStatus, String bodyStatus) {
         ResponseEntity<BuyResponse> response = SaleController.toResponse(BuyResult.of(outcome));
@@ -45,7 +46,7 @@ class SaleControllerTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1, SUCCESS", "0, SOLD_OUT", "-1, ALREADY_BOUGHT", "-2, NOT_ACTIVE"})
+    @CsvSource({"1, SUCCESS", "0, SOLD_OUT", "-1, ALREADY_BOUGHT", "-2, NOT_ACTIVE", "-3, NOT_ADMITTED"})
     void mapsLuaResults(long luaResult, BuyOutcome expected) {
         assertThat(BuyOutcome.fromScriptResult(luaResult)).isEqualTo(expected);
     }

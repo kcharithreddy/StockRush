@@ -7,13 +7,13 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.util.UUID;
 
 /**
- * Base for tests that need real PostgreSQL 16 (schema from infra/db/migration via Flyway) and Redis 7.
+ * Base for tests that need real PostgreSQL 16 (schema from infra/db/migration via Flyway) and Redis 7
+ * with the production ACL (the service connects as its own restricted user, see {@link AclRedis}).
  * The containers start once and are shared by every test class.
  * Kafka listeners and the scheduled jobs are off: tests call the beans directly.
  */
@@ -22,7 +22,6 @@ import java.util.UUID;
         "spring.kafka.admin.auto-create=false",
         "flashsale.jobs.enabled=false",
         "flashsale.admin.reset-enabled=true",
-        "spring.data.redis.password=",
         com.flashsale.order.security.TestTokens.SECRET_PROPERTY,
         // The same migrations production applies; the container's own user stands in for the app role.
         "spring.flyway.locations=filesystem:../infra/db/migration",
@@ -34,11 +33,8 @@ public abstract class IntegrationTest {
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16.16")
             .withDatabaseName("flashsale");
 
-    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4.12-alpine").withExposedPorts(6379);
-
     static {
         POSTGRES.start();
-        REDIS.start();
     }
 
     @DynamicPropertySource
@@ -46,8 +42,7 @@ public abstract class IntegrationTest {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
-        registry.add("spring.data.redis.host", REDIS::getHost);
-        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        AclRedis.register(registry);
     }
 
     @Autowired
@@ -59,7 +54,7 @@ public abstract class IntegrationTest {
     @BeforeEach
     void cleanState() {
         jdbc.update("TRUNCATE orders");
-        redis.getConnectionFactory().getConnection().serverCommands().flushAll();
+        AclRedis.flushAll();
     }
 
     protected UUID insertOrder(long saleId, UUID userId, String status, int ageMinutes) {

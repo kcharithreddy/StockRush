@@ -15,6 +15,7 @@ services:
     volumes: !override
       - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./loadtest/nginx-no-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
+      - ./infra/tls:/etc/nginx/tls:ro
 
   sale-1:
     environment:

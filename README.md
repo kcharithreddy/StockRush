@@ -71,6 +71,7 @@ Requires Docker and Java 17+.
 
 ```bash
 cp .env.example .env              # then change the passwords in .env
+scripts/dev-cert.sh               # local CA + certificate for https://localhost:8443 (git-ignored)
 (cd sale-service && ./mvnw -DskipTests package)
 (cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build
@@ -83,20 +84,21 @@ ADMIN=$(scripts/token.sh shopadmin)
 BUYER=$(scripts/token.sh buyer1)
 
 curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/warmup        # → {"saleId":1,"stock":100}
-curl -X POST -H "Authorization: Bearer $BUYER" localhost:8080/sales/1/buy                 # → {"status":"PROCESSING","orderToken":"…"}
-curl -H "Authorization: Bearer $BUYER" localhost:8080/orders/<orderToken>                 # → {"status":"PENDING_PAYMENT"}
-curl -X POST -H "Authorization: Bearer $BUYER" localhost:8080/orders/<orderToken>/pay     # → {"status":"PAID"}
-curl localhost:8080/sales/1/stock                                                         # → {"stock":99} (public)
+curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $BUYER" https://localhost:8443/sales/1/buy                 # → {"status":"PROCESSING","orderToken":"…"}
+curl --cacert infra/tls/ca.crt -H "Authorization: Bearer $BUYER" https://localhost:8443/orders/<orderToken>                 # → {"status":"PENDING_PAYMENT"}
+curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $BUYER" https://localhost:8443/orders/<orderToken>/pay     # → {"status":"PAID"}
+curl --cacert infra/tls/ca.crt https://localhost:8443/sales/1/stock                      # → {"stock":99} (public)
 ```
 
 Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 
 | URL | What |
 | :-- | :-- |
-| http://localhost:8080 | API (Nginx) |
+| https://localhost:8443 | API (Nginx, TLS 1.2/1.3); http://localhost:8080 redirects here |
 | http://localhost:8090 | order-service admin (host only) |
 | http://localhost:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`) |
 | http://localhost:9090 | Prometheus |
+| http://localhost:9093 | Alertmanager (alerts: oversell risk, service down, dead-lettered events, errors, latency, consumer lag) |
 | http://localhost:8180 | Keycloak (admin console: `admin` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`) |
 
 The database schema comes from Flyway migrations in `infra/db/migration`, applied automatically by the one-shot `db-migrate` container on `docker compose up`; new migrations apply to an existing database without losing data. If you ran a version of this repo from before migrations existed, recreate the database once (`docker compose down -v`).
@@ -195,6 +197,10 @@ The timeout worker cancels overdue orders with one `UPDATE … RETURNING` (batch
 
 A user whose order expires stays in the buyers set and cannot buy again in that sale. It keeps the rule simple and stops a user from holding a unit, letting it expire and grabbing it again.
 
+### Waiting room (optional, per sale)
+
+A sale can be sold through a virtual waiting room (demo: sale 2). Buyers `POST /sales/{id}/queue`, poll `GET /sales/{id}/queue` until it says `ADMITTED`, then buy. People who join before the sale opens are shuffled (a lottery, so speed and bots gain nothing); later arrivals queue in order. Every second the next batch is admitted; a buy from anyone not admitted gets `403 NOT_ADMITTED`, checked inside the same atomic Lua script as the stock decrement. In the load test, 200 bots calling buy directly were all refused while exactly 100 of 2,000 queued buyers won. Details: ARCHITECTURE.md §18.
+
 ## Failure scenarios
 
 | What fails | What happens |
@@ -227,6 +233,8 @@ Everything — k6, Nginx, both JVMs, order-service, Redis, Kafka, PostgreSQL, Ke
 
 ## Monitoring
 
+Every request gets an id from Nginx, returned as `X-Request-Id` and carried through both services and Kafka, so one purchase can be followed from the Nginx access log to the order being written; the services log JSON (Elastic Common Schema) in Docker.
+
 Prometheus scrapes both sale-service instances and order-service on their internal management ports every 5 s. Grafana loads the **StockRush — Flash Sale** dashboard automatically.
 
 | Metric | Meaning |
@@ -253,19 +261,19 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 ## Security
 
 - **Identity:** users authenticate with Keycloak. Every protected request carries a short-lived access token whose signature, issuer, audience and expiry are checked; the user id is the token's subject. Buying and orders need the `buyer` role, `/admin/**` the `admin` role. Forged, tampered, expired or foreign tokens get 401.
-- Only Nginx is published beyond `127.0.0.1`; it routes `/sales/*` and `/orders/*` and nothing else.
+- Only Nginx is published beyond `127.0.0.1`. It serves HTTPS only (TLS 1.2/1.3, HSTS and strict security headers; plain HTTP gets a 308 redirect) and routes `/sales/*` and `/orders/*`, nothing else.
 - Every password comes from a git-ignored `.env`; services refuse to start without them.
-- Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
+- Each service has its own Redis user that can reach only its keys and the exact commands it needs (no FLUSHALL, KEYS or CONFIG); services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
 - Containers run as a non-root user with a read-only filesystem, no Linux capabilities and a memory limit.
 - `/orders` endpoints only ever show the caller's own orders. The test-only reset endpoint does not exist unless `RESET_ENABLED=true`.
-- Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL and Dependabot.
+- Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL, Dependabot, and a Trivy scan of both container images on every pull request.
 
 Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a vulnerability: [SECURITY.md](SECURITY.md).
 
 ## Limitations and next steps
 
 - **Keycloak runs in development mode** (plain HTTP, a password-grant client for scripts). Production: `start` behind TLS with a real hostname, and only the browser client with PKCE.
-- **Bots.** One account per purchase is only as strong as account creation. Next: a virtual waiting room / queue token before the sale opens, CAPTCHA on suspicious traffic.
+- **Bots.** The waiting room stops queue-jumping, but one account per purchase is only as strong as account creation. Next: CAPTCHA at sign-up.
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
 - **TLS** at Nginx and between services; Kafka SASL; per-service Redis ACL users.
-- **Alerts** on `redis_high`, consumer lag and 5xx rate; structured JSON logs with request ids.
+- **Alert delivery.** Alerts fire in Alertmanager but no receiver is configured; production would route `critical` to an on-call pager.

@@ -207,7 +207,7 @@ Every protected call carries `Authorization: Bearer <access token>`. The user id
 
 A token is accepted only if all of these hold: valid RS256 signature from the realm's JWKS, `iss` = `OIDC_ISSUER`, `aud` contains `stockrush-api`, not expired, and `sub` is a UUID. Missing or invalid token → 401; valid token without the role → 403. See §17 for the load-test issuer.
 
-### sale-service (behind Nginx at [http://localhost:8080](http://localhost:8080))
+### sale-service (behind Nginx at https://localhost:8443)
 
 `POST /sales/{saleId}/buy` (role `buyer`)
 
@@ -305,6 +305,7 @@ Every 60 s, for each sale currently within its window: `expected = total_stock �
 
 - **Per user (sale-service):** `HandlerInterceptor` on `/sales/*/buy`. Fixed window: `INCR rl:{userId}:{epochSecond}`, `EXPIRE 2` on first hit (both in `scripts/rate_limit.lua`, so they are atomic), reject with 429 above 5.
 - **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The limit applies to the buy route only and lives in `infra/nginx-ratelimit.conf`, which `nginx.conf` includes. For k6 runs (all k6 traffic is one IP) either comment out its `limit_req` line, or start Nginx with `docker-compose.loadtest.yml`, which mounts the empty `loadtest/nginx-no-ratelimit.conf` in its place.
+- **TLS (Nginx):** HTTPS on :8443 with TLS 1.2/1.3 only, ECDHE AEAD ciphers, no session tickets, HTTP/2. Every response carries HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: default-src 'none'`. Port 8080 only answers `308` to the HTTPS URL (308 keeps the method, so a POST is not turned into a GET). The certificate is in `infra/tls/` (git-ignored): `scripts/dev-cert.sh` creates a local CA and a `localhost` certificate; production puts a real one there. Inside the Docker network traffic stays plain HTTP (a private network with no published ports).
 - **Nginx routing (`infra/nginx.conf`):** `POST /sales/{id}/buy` and `GET /sales/{id}/stock` go round-robin to `sale-1`/`sale-2`; `/orders/{uuid}` and `/orders/{uuid}/pay` go to order-service; every other path (including `/admin/**` and `/actuator/**`) is 404. Upstreams use Docker DNS with `resolve`, so Nginx keeps running while an instance is down. Upstream connections are reused (`keepalive 512`, `keepalive_requests 100000`); an instance is skipped for 5 s after 3 failed connects (2 s connect timeout), so a burst cannot take both out of rotation. A failed connect is retried on the other instance, but a request that reached an instance is never resent, so a buy is never sent twice.
 
 ## 12. Configuration
@@ -318,7 +319,7 @@ Each service reads env vars with local defaults so it runs from the IDE AND in D
 | `KAFKA` | localhost:9092 | localhost:9092 | kafka:29092 |
 | `DB_HOST` | — | localhost | postgres |
 | `MANAGEMENT_PORT` | 9081 | 9091 | 9080 for sale containers |
-| `REDIS_PASSWORD` | from `.env` | from `.env` | from `.env` |
+| `REDIS_SALE_PASSWORD` / `REDIS_ORDER_PASSWORD` | sale-service's Redis user (`sale-service`) | order-service's Redis user (`order-service`) | from `.env` |
 | `DB_USER` / `DB_PASSWORD` | — | from `.env` | from `.env` |
 | `RESET_ENABLED` | — | false | from `.env` |
 | `OIDC_ISSUER` | http://localhost:8180/realms/stockrush | same | same (Keycloak's public URL, `KC_HOSTNAME`) |
@@ -338,9 +339,33 @@ Both services: Actuator with `health,prometheus` exposed on the separate `MANAGE
 - `flashsale_buy_total{result="SUCCESS|SOLD_OUT|ALREADY_BOUGHT|NOT_ACTIVE|TRY_AGAIN"}` (sale-service)
 - `flashsale_orders_placed_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service). The spec originally said `flashsale_orders_created_total`, but the Prometheus client strips a trailing `_created` (an OpenMetrics reserved suffix), so that name cannot be exported.
 - `flashsale_reconcile_mismatch_total{direction}` (order-service)
-- `flashsale_orders_dead_lettered_total{reason}` (order-service): records parked on `order-created.DLT`, by root-cause exception
+- `flashsale_orders_dead_lettered_total{reason}` (order-service): records parked on `order-created.DLT`, by reason — one of `invalid_event`, `integrity_violation`, `undeserializable`, `retries_exhausted`, all registered at 0 on startup so the first event is visible to `increase()`. The exact exception is in the log and the record headers
 
 Prometheus (`infra/prometheus.yml`) scrapes `sale-1:9080`, `sale-2:9080` and `order-service:9091` every 5 s. Grafana provisions the datasource and the **StockRush — Flash Sale** dashboard from `infra/grafana/`. Its stat panels count exactly within the selected time range (`max_over_time − min_over_time`), not with `increase()`, whose extrapolation would show e.g. 313 for 300 orders.
+
+### Logs and request ids
+
+- Nginx gives every request an id (`$request_id`), always its own (a client cannot choose the id it is logged under), passes it upstream as `X-Request-Id` and returns it to the client. Its access log is one JSON line per request with that id, status, timing and the upstream instance.
+- Both services keep that id (or generate one when called directly), put it in the log context as `request_id` before Spring Security runs (so rejected requests are traceable too) and return it.
+- sale-service copies it onto the Kafka record as a `request_id` header (`RequestIdProducerInterceptor`); order-service restores it while processing the record (`RequestIdRecordInterceptor`), and a dead-lettered record keeps it. One id therefore links the Nginx line, sale-service's `Unit won` line and order-service's `Order created` line.
+- In Docker the services log one JSON object per line in Elastic Common Schema (`LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs`), ready for Loki, Elasticsearch or CloudWatch; local runs keep plain text with the id in brackets. Only winners are logged at INFO, never the flood of sold-out answers.
+
+### Alerts
+
+Rules in `infra/alerting/alerts.yml`, loaded by Prometheus and sent to Alertmanager (http://localhost:9093). `infra/alerting/alerts.test.yml` unit-tests them with `promtool`, and CI runs those tests on every pull request.
+
+| Alert | Fires when | Severity |
+| :---- | :---- | :---- |
+| `OversellRisk` | any `redis_high` reconciliation mismatch in 5 min | critical |
+| `ServiceDown` | a sale-service or order-service instance cannot be scraped for 1 min | critical |
+| `StockHeldWithoutOrders` | ≥ 5 `redis_low` mismatches in 10 min (more than in-flight events explain) | warning |
+| `OrderEventsDeadLettered` | any event parked on `order-created.DLT` in 5 min, per reason | warning |
+| `HighServerErrorRate` | > 2 % of a service's requests are 5xx for 2 min (the normal flood of 410s is not an error) | warning |
+| `OrderEventsNotPublished` | winners keep getting `503 TRY_AGAIN` (Kafka unreachable) for 2 min | warning |
+| `BuyLatencyHigh` | buy p95 > 1 s for 5 min | warning |
+| `OrderConsumerLagging` | > 500 events behind on `order-created` for 2 min | warning |
+
+Every counter an alert relies on is registered at 0 when its service starts (`redis_high`/`redis_low`, and the four bounded dead-letter reasons). A counter that first appears already at 1 is invisible to `increase()`: a live drill showed the first dead-lettered event, and therefore the first oversell signal, would otherwise never alert. Alertmanager has no receiver configured (nothing to send to on a developer machine); `alertmanager.yml` explains how to add Slack, e-mail or PagerDuty. While a service is down its warnings are inhibited. Prometheus reads rules at startup: after editing them, `docker compose restart prometheus`.
 
 Grafana panels (document the PromQL in README):
 
@@ -379,7 +404,7 @@ Grafana panels (document the PromQL in README):
 
 ```sh
 curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/reset
-curl -X POST -H "Authorization: Bearer $TOKEN" localhost:8080/sales/1/buy
+curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $TOKEN" https://localhost:8443/sales/1/buy
 docker compose exec redis redis-cli SET sale:1:stock 10
 seq 1 200 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
   -X POST -H "X-User-Id: {}" localhost:8081/sales/1/buy | sort | uniq -c
@@ -394,7 +419,7 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 - `OrderConsumer`, `OrderController` (status + pay), `PaymentTimeoutWorker`, `ReconciliationJob`.
 - Dockerfiles (`FROM eclipse-temurin:17-jre`, copy jar), compose services `sale-1`, `sale-2`, `order-service`, `nginx`; `infra/nginx.conf`.
 
-**Accept:** race test through `localhost:8080` (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` as the owner); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
+**Accept:** race test through Nginx (`localhost:8080` at the time; HTTPS on `localhost:8443` since Step C) (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` as the owner); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
 
 ### Phase 4 — Load test, monitoring, docs
 
@@ -408,6 +433,7 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 
 ```sh
 cp .env.example .env                      # once; then change the passwords
+scripts/dev-cert.sh                       # once: local CA + certificate for https://localhost:8443
 TOKEN=$(scripts/token.sh buyer1)          # demo users: buyer1, buyer2, shopadmin (password DEMO_USER_PASSWORD)
 ADMIN=$(scripts/token.sh shopadmin)
 docker compose up -d                      # start everything
@@ -432,7 +458,8 @@ docker compose run --rm db-migrate info   # show migration history
 | Threat | Control |
 | :---- | :---- |
 | Infrastructure reachable from the network | Every compose port bound to `127.0.0.1` |
-| Anyone editing stock or flushing Redis | `requirepass` from `.env` |
+| Eavesdropping / tampering on the public API | HTTPS only (TLS 1.2/1.3), HSTS, HTTP → 308 redirect |
+| Anyone editing stock or flushing Redis | Redis ACL users (`infra/redis/users.acl.template`): `sale-service` may only touch `sale:*`/`rl:*` with the commands its Lua scripts use; `order-service` only `sale:*` with GET/SET/INCR/DEL; neither can FLUSHALL, KEYS, CONFIG or run anything else. The operator account (`default`, `REDIS_PASSWORD`) is for humans only. Passwords come from `.env` and are rendered into the ACL at container start |
 | App able to drop tables / read everything | Least-privilege `DB_USER`; schema owned by `flashsale_migrator`, used only by the one-shot `db-migrate` container; superuser only creates roles |
 | Secrets in git | `.env` git-ignored; no defaults for secrets; `.env.example` only |
 | Metrics and health leaking internals | Actuator on an internal management port |
@@ -443,7 +470,9 @@ docker compose run --rm db-migrate info   # show migration history
 | Instance clock skew deciding the sale window | `buy.lua` uses Redis `TIME` |
 | Stack traces in responses | `server.error.include-message/stacktrace: never` |
 | Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
-| Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot |
+| Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot, Trivy image scan (fails on fixable CRITICAL) |
+| Known CVEs in bundled libraries | Tomcat 10.1.59 and Netty 4.1.137 pinned in both poms over Spring Boot's managed versions (fixable CRITICALs found by Trivy). `.trivyignore.yaml` lists findings that do not apply, each with its reason and an expiry date after which the gate fails again: today two spring-webmvc 6.2.19 CVEs (XsltView rendering, SSE view fragments — neither service renders views); their only open-source fix is Spring Framework 7 / Spring Boot 4 |
+| Personal data in logs | Logs never contain order tokens, user ids or event payloads (CodeQL `java/sensitive-log`); the request id links log lines instead, and dead-lettered records keep the full payload on the DLT for admins |
 | Stray topics | Kafka `auto.create.topics.enable=false` |
 | Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |
 | Internal endpoints reachable from outside | Nginx routes only `/sales/*` and `/orders/*`; sale containers are not published; order-service on `127.0.0.1` only |
@@ -472,11 +501,35 @@ docker compose run --rm db-migrate info   # show migration history
 
 ### Step C — after Phase 4
 
-- Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
-- TLS at Nginx; Kafka SASL; Redis ACL users per service.
+- ~~Virtual waiting room~~ — done: see §18. CAPTCHA at sign-up (Keycloak supports reCAPTCHA on registration).
+- ~~TLS at Nginx~~ — done: see §11. ~~Redis ACL users per service~~ — done: see the table above. Kafka SASL (Kafka is reachable only on the Docker network and `127.0.0.1`).
 - ~~Dead-letter topic for the consumer~~ — done: see §10, Order creation.
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
-- Image scanning in CI; branch protection on `main`.
-- Structured JSON logs with request ids; alerts on `flashsale_reconcile_mismatch_total`.
+- ~~Image scanning in CI~~ — done: `.github/workflows/image-scan.yml` builds both images on every pull request, on `main` and weekly, scans them with Trivy (OS packages and the libraries inside the jar), uploads fixable HIGH/CRITICAL findings to Security → Code scanning and fails the build on any fixable CRITICAL.
+- Branch protection on `main` (a repository setting: require pull requests and the CI, CodeQL and image-scan checks).
+- ~~Structured JSON logs with request ids~~ — done: see §13 Logs and request ids.
+- ~~Alerts~~ — done: see §13 Alerts.
 
+## 18. Virtual waiting room
+
+A sale can be sold through a waiting room (`flash_sales.waiting_room`, migration V4; demo: sale 2). Then nobody can buy until they have queued and been let in, which takes the advantage away from bots and from whoever's request happens to land first.
+
+**API** (role `buyer`, through Nginx):
+
+| Call | Answer |
+| :---- | :---- |
+| `POST /sales/{id}/queue` | join: `{"status":"WAITING","position":n}`, or `ADMITTED`, `NO_WAITING_ROOM` (the sale has none: buy directly), `SOLD_OUT` (410), `SALE_NOT_ACTIVE` (403) |
+| `GET /sales/{id}/queue` | the same, without joining; `NOT_IN_QUEUE` (404) if the caller never joined. Clients poll it about once a second (the per-user limit of 5 requests/s applies) |
+| `POST /sales/{id}/buy` before being admitted | `403 {"status":"NOT_ADMITTED"}` |
+
+**How it works** (all in Redis, all atomic Lua):
+
+- `queue.lua` adds the user to the sorted set `sale:{id}:queue`. Anyone who joins **before the sale opens** gets a random score in [0, 10⁹): a lottery, so being a millisecond faster gains nothing. Anyone joining **after** it opens gets 10⁹ + milliseconds since the start (microsecond precision), so they queue behind the lottery in arrival order. Joining twice keeps one's place.
+- `admit.lua` runs every second on every sale-service instance (`AdmissionScheduler`). An `INCR` on the per-second key `sale:{id}:admit:{epochSecond}` lets only the first caller in each second act; it then moves the next `flashsale.waiting-room.admit-per-second` users (default 200) from the queue into the set `sale:{id}:admitted`. Nobody is admitted before the sale opens or once stock is 0 (waiting users then see `SOLD_OUT`).
+- `buy.lua` checks the gate first: if `sale:{id}:gate` exists and the user is not in `sale:{id}:admitted`, it returns −3 (`NOT_ADMITTED`). The check is inside the same atomic script as the stock decrement, so it cannot be raced.
+- order-service's warm-up sets `sale:{id}:gate` and adds the sale to `sale:gated` (the list the admission job reads) when `waiting_room` is true, and removes both otherwise; reset empties the queue and the admitted set.
+
+**Load test** (`loadtest/waiting-room.js`): 2,000 honest buyers join, poll and buy once admitted, while 200 bots call buy directly. Exactly 100 honest buyers won, all 200 bot attempts got `NOT_ADMITTED` (0 bot orders in PostgreSQL), 757 waiting buyers were told `SOLD_OUT` instead of hammering buy, 0 errors.
+
+**Trade-off.** Admission is a fixed rate, not tied to remaining stock, so more people are admitted than there are units (1,243 for 100 in the load test); the extra admitted buyers simply get `410`. Admitting in proportion to remaining stock is a possible refinement. The waiting room limits who may buy; one-account-per-person still depends on account creation (CAPTCHA at sign-up is outside this project).

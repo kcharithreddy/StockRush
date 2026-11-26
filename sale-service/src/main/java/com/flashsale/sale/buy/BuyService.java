@@ -70,7 +70,8 @@ public class BuyService {
         }
 
         Long result = redis.execute(buyScript,
-                List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId), RedisKeys.window(saleId)),
+                List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId), RedisKeys.window(saleId),
+                        RedisKeys.gate(saleId), RedisKeys.admitted(saleId)),
                 userId.toString());
         if (result == null) {
             throw new IllegalStateException("buy.lua returned no result");
@@ -94,7 +95,7 @@ public class BuyService {
             payload = json.writeValueAsString(event);
         } catch (JsonProcessingException e) {
             compensate(event);
-            throw new IllegalStateException("Could not serialise " + event, e);
+            throw new IllegalStateException("Could not serialise the order event for sale " + event.saleId(), e);
         }
 
         CompletableFuture<SendResult<String, String>> send;
@@ -102,21 +103,22 @@ public class BuyService {
             send = kafka.send(RedisConfig.ORDER_CREATED_TOPIC, event.userId(), payload);
         } catch (RuntimeException e) {
             // Rejected before leaving the producer (e.g. no broker metadata): definitely not sent.
-            log.warn("Kafka rejected {}, compensating", event, e);
+            log.warn("Kafka rejected an order event for sale {}, compensating", event.saleId(), e);
             compensate(event);
             return BuyResult.of(BuyOutcome.TRY_AGAIN);
         }
 
         try {
             send.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            log.info("Unit won in sale {}; order event published", event.saleId());
             return BuyResult.success(event.orderToken());
         } catch (ExecutionException e) {
             // Kafka reported the send as failed: give the unit back.
-            log.warn("Kafka send failed for {}, compensating", event, e.getCause());
+            log.warn("Kafka send failed for sale {}, compensating", event.saleId(), e.getCause());
             compensate(event);
             return BuyResult.of(BuyOutcome.TRY_AGAIN);
         } catch (TimeoutException e) {
-            log.error("Kafka send for {} still pending after {} s", event, SEND_TIMEOUT_SECONDS);
+            log.error("Kafka send for sale {} still pending after {} s", event.saleId(), SEND_TIMEOUT_SECONDS);
             compensateIfEventuallyFails(send, event);
             return BuyResult.of(BuyOutcome.TRY_AGAIN);
         } catch (InterruptedException e) {
@@ -135,10 +137,10 @@ public class BuyService {
                                              OrderCreatedEvent event) {
         send.whenComplete((result, error) -> {
             if (error != null) {
-                log.warn("Late Kafka failure for {}, compensating", event, error);
+                log.warn("Late Kafka failure for sale {}, compensating", event.saleId(), error);
                 compensate(event);
             } else {
-                log.info("Late Kafka success for {}; order will be created", event);
+                log.info("Late Kafka success for sale {}; order will be created", event.saleId());
             }
         });
     }

@@ -19,6 +19,10 @@
 
     <properties>
         <java.version>17</java.version>
+        <!-- Security patch overrides of Spring Boot's managed versions (Trivy, fixable CRITICAL CVEs).
+             Remove each once the Spring Boot version in use ships the same or newer. -->
+        <tomcat.version>10.1.59</tomcat.version>
+        <netty.version>4.1.137.Final</netty.version>
     </properties>
 
     <dependencies>

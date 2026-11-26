@@ -9,9 +9,6 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,21 +26,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** 200 buyers race for 10 units against a real Redis: exactly 10 must win. */
-@SpringBootTest(properties = {"spring.kafka.admin.auto-create=false", "spring.data.redis.password="})
-@Testcontainers
+@SpringBootTest(properties = {"spring.kafka.admin.auto-create=false"})
 class BuyConcurrencyTest {
 
     private static final long SALE = 1;
     private static final int STOCK = 10;
     private static final int BUYERS = 200;
 
-    @Container
-    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4.12-alpine").withExposedPorts(6379);
-
     @DynamicPropertySource
     static void redisProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.data.redis.host", REDIS::getHost);
-        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        com.flashsale.sale.AclRedis.register(registry);
     }
 
     @MockitoBean
@@ -57,10 +49,10 @@ class BuyConcurrencyTest {
 
     @BeforeEach
     void setUp() {
-        redis.getConnectionFactory().getConnection().serverCommands().flushAll();
-        redis.opsForValue().set("sale:1:stock", Integer.toString(STOCK));
+        com.flashsale.sale.AclRedis.flushAll();
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:1:stock", Integer.toString(STOCK));
         long now = System.currentTimeMillis();
-        redis.opsForValue().set("sale:1:window", (now - 60_000) + "," + (now + 3_600_000));
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:1:window", (now - 60_000) + "," + (now + 3_600_000));
         buyService.clearSoldOutFlags();
         when(kafka.send(anyString(), anyString(), anyString())).thenReturn(CompletableFuture.completedFuture(null));
     }
@@ -94,7 +86,7 @@ class BuyConcurrencyTest {
         assertThat(won).isEqualTo(STOCK);
         assertThat(soldOut).isEqualTo(BUYERS - STOCK);
         assertThat(redis.opsForValue().get("sale:1:stock")).isEqualTo("0");
-        assertThat(redis.opsForSet().size("sale:1:buyers")).isEqualTo(STOCK);
+        assertThat(com.flashsale.sale.AclRedis.admin().opsForSet().size("sale:1:buyers")).isEqualTo(STOCK);
         verify(kafka, times(STOCK)).send(anyString(), anyString(), anyString());
     }
 }

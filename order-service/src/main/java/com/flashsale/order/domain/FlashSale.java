@@ -32,6 +32,9 @@ public class FlashSale {
     @Column(name = "ends_at", nullable = false)
     private Instant endsAt;
 
+    @Column(name = "waiting_room", nullable = false)
+    private boolean waitingRoom;
+
     protected FlashSale() {
     }
 
@@ -57,6 +60,10 @@ public class FlashSale {
 
     public Instant getEndsAt() {
         return endsAt;
+    }
+
+    public boolean hasWaitingRoom() {
+        return waitingRoom;
     }
 
     public boolean isActiveAt(Instant now) {

@@ -21,7 +21,7 @@ import crypto from 'k6/crypto';
 import encoding from 'k6/encoding';
 import { Counter } from 'k6/metrics';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
+const BASE_URL = __ENV.BASE_URL || 'https://localhost:8443';
 const SALE_ID = __ENV.SALE_ID || '1';
 const STOCK = Number(__ENV.STOCK || 100);
 const VUS = Number(__ENV.VUS || 1000);
@@ -39,6 +39,9 @@ const soldOut = new Counter('sold_out');
 const unexpected = new Counter('unexpected_status');
 
 export const options = {
+  // The local certificate comes from our own development CA (scripts/dev-cert.sh), which k6 cannot be told
+  // to trust, so verification is skipped for localhost only. Against a real host, certificates are verified.
+  insecureSkipTLSVerify: BASE_URL.startsWith('https://localhost'),
   scenarios: {
     flash_sale: {
       executor: 'shared-iterations',

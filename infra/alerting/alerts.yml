@@ -1,0 +1,88 @@
+# Prometheus alert rules for StockRush. Unit-tested by alerts.test.yml (promtool), run in CI.
+# Every alert has a runbook annotation pointing at the section of ARCHITECTURE.md that explains it.
+groups:
+  - name: stockrush-correctness
+    rules:
+      # The one that must never fire: Redis holds more stock than PostgreSQL allows → a unit could be sold twice.
+      - alert: OversellRisk
+        expr: increase(flashsale_reconcile_mismatch_total{direction="redis_high"}[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis stock is higher than PostgreSQL allows — oversell risk"
+          description: "Reconciliation found Redis stock above total_stock minus held orders. Stop the sale (delete sale:{id}:window) and investigate before more units are sold."
+          runbook: "ARCHITECTURE.md §10 Reconciliation"
+
+      # Units held in Redis without an order, for longer than in-flight events can explain.
+      - alert: StockHeldWithoutOrders
+        expr: increase(flashsale_reconcile_mismatch_total{direction="redis_low"}[10m]) >= 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis stock has stayed below PostgreSQL's figure for 10 minutes"
+          description: "Buyers hold units with no order row. Check the dead-letter topic (GET /admin/dead-letters) and consumer lag."
+          runbook: "ARCHITECTURE.md §10 Reconciliation"
+
+      - alert: OrderEventsDeadLettered
+        # Every reason is registered at 0 when order-service starts, so increase() sees the first event.
+        expr: increase(flashsale_orders_dead_lettered_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Order events were parked on order-created.DLT ({{ $labels.reason }})"
+          description: "Each one is a buyer holding a unit without an order. Inspect with GET /admin/dead-letters, fix the cause, then POST /admin/dead-letters/replay."
+          runbook: "ARCHITECTURE.md §10 Order creation"
+
+  - name: stockrush-availability
+    rules:
+      - alert: ServiceDown
+        expr: up{job=~"sale-service|order-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} ({{ $labels.job }}) is down"
+          description: "Prometheus has not been able to scrape it for a minute. Nginx routes around one sale instance; order-service has no replica."
+          runbook: "ARCHITECTURE.md §3"
+
+      - alert: HighServerErrorRate
+        expr: |
+          sum by (job) (rate(http_server_requests_seconds_count{status=~"5..", uri!~"/actuator.*"}[5m]))
+            / sum by (job) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[5m])) > 0.02
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 2% of {{ $labels.job }} requests fail with 5xx"
+          description: "Usually Redis, Kafka or PostgreSQL trouble: the services answer 503 TRY_AGAIN when a store is down."
+          runbook: "README.md Failure scenarios"
+
+      - alert: OrderEventsNotPublished
+        expr: sum(rate(flashsale_buy_total{result="TRY_AGAIN"}[2m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Winning buyers are getting 503 TRY_AGAIN"
+          description: "sale-service cannot publish OrderCreated to Kafka; units are being returned. Check the Kafka broker."
+          runbook: "ARCHITECTURE.md §10 Buy, step 5"
+
+      - alert: BuyLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{uri="/sales/{saleId}/buy"}[5m]))) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 buy latency above 1 s for 5 minutes"
+          runbook: "docs/loadtest-results.md"
+
+      - alert: OrderConsumerLagging
+        expr: sum(kafka_consumer_fetch_manager_records_lag{topic="order-created"}) > 500
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "order-service is {{ $value }} events behind on order-created"
+          description: "Winners are waiting for their order rows. Expected briefly during a spike; sustained lag usually means PostgreSQL is slow or down."
+          runbook: "ARCHITECTURE.md §8"

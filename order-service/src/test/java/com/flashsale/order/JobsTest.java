@@ -74,4 +74,11 @@ class JobsTest extends IntegrationTest {
         var c = meters.find("flashsale.reconcile.mismatch").tag("direction", direction).counter();
         return c == null ? 0 : c.count();
     }
+
+    @Test
+    void mismatchCountersExistAtZeroBeforeAnyMismatch() {
+        // Without this, Prometheus increase() never sees the first oversell signal.
+        assertThat(meters.find("flashsale.reconcile.mismatch").tag("direction", "redis_high").counter()).isNotNull();
+        assertThat(meters.find("flashsale.reconcile.mismatch").tag("direction", "redis_low").counter()).isNotNull();
+    }
 }

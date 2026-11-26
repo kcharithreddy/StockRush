@@ -25,9 +25,11 @@ x-sale-service: &sale-service
     PORT: 8080
     MANAGEMENT_PORT: 9080
     REDIS_HOST: redis
-    REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    REDIS_SALE_PASSWORD: ${REDIS_SALE_PASSWORD:?set REDIS_SALE_PASSWORD in .env}
     KAFKA: kafka:29092
     OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
+    # One JSON object per log line (Elastic Common Schema), including request_id.
+    LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
   depends_on:
     redis:
       condition: service_healthy
@@ -91,15 +93,20 @@ services:
 
   redis:
     image: redis:7.4.12-alpine
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    # One Redis user per service plus an operator account (infra/redis/users.acl.template).
+    command: ["sh", "/etc/redis/start.sh"]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
-      # Lets `docker compose exec redis redis-cli` authenticate without typing the password.
+      REDIS_SALE_PASSWORD: ${REDIS_SALE_PASSWORD:?set REDIS_SALE_PASSWORD in .env}
+      REDIS_ORDER_PASSWORD: ${REDIS_ORDER_PASSWORD:?set REDIS_ORDER_PASSWORD in .env}
+      # Lets `docker compose exec redis redis-cli` log in as the operator (default) user.
       REDISCLI_AUTH: ${REDIS_PASSWORD}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
+      - ./infra/redis/users.acl.template:/etc/redis/users.acl.template:ro
+      - ./infra/redis/start.sh:/etc/redis/start.sh:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -179,7 +186,7 @@ services:
     image: stockrush/order-service:local
     environment:
       REDIS_HOST: redis
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      REDIS_ORDER_PASSWORD: ${REDIS_ORDER_PASSWORD:?set REDIS_ORDER_PASSWORD in .env}
       KAFKA: kafka:29092
       DB_HOST: postgres
       DB_USER: ${DB_USER:?set DB_USER in .env}
@@ -187,6 +194,7 @@ services:
       RESET_ENABLED: ${RESET_ENABLED:-false}
       ORDERS_PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-10}
       OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
     ports:
       # Admin endpoints (Keycloak admin role required) for operators on this machine only.
       - "127.0.0.1:8090:8090"
@@ -214,10 +222,12 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "8080:8080"
+      - "8443:8443"   # HTTPS (certificate from scripts/dev-cert.sh)
+      - "8080:8080"   # redirects to HTTPS
     volumes:
       - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./infra/nginx-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
+      - ./infra/tls:/etc/nginx/tls:ro
     depends_on:
       sale-1:
         condition: service_healthy
@@ -236,6 +246,7 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/alerting/alerts.yml:/etc/prometheus/alerts.yml:ro
       - promdata:/prometheus
     security_opt:
       - no-new-privileges:true
@@ -243,6 +254,21 @@ services:
       - sale-1
       - sale-2
       - order-service
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./infra/alerting/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertdata:/alertmanager
+    security_opt:
+      - no-new-privileges:true
 
   grafana:
     image: grafana/grafana:12.1.0
@@ -271,3 +297,4 @@ volumes:
   redisdata:
   promdata:
   grafanadata:
+  alertdata:

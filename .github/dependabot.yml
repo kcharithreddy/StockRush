@@ -44,6 +44,12 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "redis"
         update-types: ["version-update:semver-major"]
+      # The migration image must stay on the Flyway major the tests use (flyway-core from Spring Boot).
+      - dependency-name: "flyway/flyway"
+        update-types: ["version-update:semver-major"]
+      # Keycloak majors change the realm format and admin APIs; upgrade deliberately.
+      - dependency-name: "keycloak/keycloak"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

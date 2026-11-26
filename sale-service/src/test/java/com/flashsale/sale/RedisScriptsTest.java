@@ -11,26 +11,19 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Runs the Lua scripts against a real Redis 7. */
-@SpringBootTest(properties = {"spring.kafka.admin.auto-create=false", "spring.data.redis.password="})
-@Testcontainers
+@SpringBootTest(properties = {"spring.kafka.admin.auto-create=false"})
 class RedisScriptsTest {
-
-    @Container
-    static final GenericContainer<?> REDIS = new GenericContainer<>("redis:7.4.12-alpine").withExposedPorts(6379);
 
     @DynamicPropertySource
     static void redisProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.data.redis.host", REDIS::getHost);
-        registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        com.flashsale.sale.AclRedis.register(registry);
     }
 
     @MockitoBean
@@ -47,11 +40,11 @@ class RedisScriptsTest {
     @Qualifier("rateLimitScript")
     RedisScript<Long> rateLimitScript;
 
-    private static final List<String> SALE_KEYS = List.of("sale:9:stock", "sale:9:buyers", "sale:9:window");
+    private static final List<String> SALE_KEYS = List.of("sale:9:stock", "sale:9:buyers", "sale:9:window", "sale:9:gate", "sale:9:admitted");
 
     @BeforeEach
     void flush() {
-        redis.getConnectionFactory().getConnection().serverCommands().flushAll();
+        com.flashsale.sale.AclRedis.flushAll();
     }
 
     @Test
@@ -59,22 +52,22 @@ class RedisScriptsTest {
         for (int i = 1; i <= 7; i++) {
             assertThat(redis.execute(rateLimitScript, List.of("rl:1:100"), "2")).isEqualTo(i);
         }
-        Long ttl = redis.getExpire("rl:1:100");
+        Long ttl = com.flashsale.sale.AclRedis.admin().getExpire("rl:1:100");
         assertThat(ttl).isBetween(1L, 2L);
     }
 
     @Test
     void buyUsesRedisClockForTheWindow() {
         long now = System.currentTimeMillis();
-        redis.opsForValue().set("sale:9:stock", "5");
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:9:stock", "5");
 
-        redis.opsForValue().set("sale:9:window", (now + 600_000) + "," + (now + 1_200_000));
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:9:window", (now + 600_000) + "," + (now + 1_200_000));
         assertThat(redis.execute(buyScript, SALE_KEYS, "1")).isEqualTo(-2L);
 
-        redis.opsForValue().set("sale:9:window", (now - 1_200_000) + "," + (now - 600_000));
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:9:window", (now - 1_200_000) + "," + (now - 600_000));
         assertThat(redis.execute(buyScript, SALE_KEYS, "1")).isEqualTo(-2L);
 
-        redis.opsForValue().set("sale:9:window", (now - 600_000) + "," + (now + 600_000));
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:9:window", (now - 600_000) + "," + (now + 600_000));
         assertThat(redis.execute(buyScript, SALE_KEYS, "1")).isEqualTo(1L);
         assertThat(redis.execute(buyScript, SALE_KEYS, "1")).isEqualTo(-1L);
         assertThat(redis.opsForValue().get("sale:9:stock")).isEqualTo("4");
@@ -82,7 +75,23 @@ class RedisScriptsTest {
 
     @Test
     void buyWithoutWindowIsNotActive() {
-        redis.opsForValue().set("sale:9:stock", "5");
+        com.flashsale.sale.AclRedis.admin().opsForValue().set("sale:9:stock", "5");
         assertThat(redis.execute(buyScript, SALE_KEYS, "1")).isEqualTo(-2L);
+    }
+
+    @Test
+    void serviceUserIsConfinedByTheAcl() {
+        // Allowed: exactly what the buy path needs.
+        assertThat(redis.opsForValue().get("sale:9:stock")).isNull();
+        assertThat(redis.opsForValue().increment("sale:9:stock")).isEqualTo(1L);
+
+        // Denied: writing a sale's configuration, touching other keys, wiping or reconfiguring Redis.
+        assertThatThrownBy(() -> redis.opsForValue().set("sale:9:stock", "1000000")).hasStackTraceContaining("NOPERM");
+        assertThatThrownBy(() -> redis.opsForValue().get("session:abc")).hasStackTraceContaining("NOPERM");
+        assertThatThrownBy(() -> redis.getConnectionFactory().getConnection().serverCommands().flushAll())
+                .hasStackTraceContaining("NOPERM");
+        assertThatThrownBy(() -> redis.getConnectionFactory().getConnection().serverCommands().getConfig("*"))
+                .hasStackTraceContaining("NOPERM");
+        assertThatThrownBy(() -> redis.keys("*")).hasStackTraceContaining("NOPERM");
     }
 }

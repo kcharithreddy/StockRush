@@ -1,6 +1,14 @@
 global:
   scrape_interval: 5s
-  evaluation_interval: 5s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   # Actuator runs on the internal management ports, which are never published.

@@ -1,0 +1,120 @@
+# promtool test rules infra/alerting/alerts.test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: oversell risk fires on any redis_high mismatch, and only then
+    interval: 1m
+    input_series:
+      - series: 'flashsale_reconcile_mismatch_total{direction="redis_high", instance="order-service:9091", job="order-service"}'
+        values: "0 0 1 1 1 1 1 1 1"
+      - series: 'flashsale_reconcile_mismatch_total{direction="redis_low", instance="order-service:9091", job="order-service"}'
+        values: "0 1 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: OversellRisk
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: OversellRisk
+        exp_alerts:
+          - exp_labels: { severity: critical, direction: redis_high, instance: "order-service:9091", job: order-service }
+            exp_annotations:
+              summary: "Redis stock is higher than PostgreSQL allows — oversell risk"
+              description: "Reconciliation found Redis stock above total_stock minus held orders. Stop the sale (delete sale:{id}:window) and investigate before more units are sold."
+              runbook: "ARCHITECTURE.md §10 Reconciliation"
+      - eval_time: 3m
+        alertname: StockHeldWithoutOrders
+        exp_alerts: []
+
+  - name: a service that stops answering scrapes is down after one minute
+    interval: 30s
+    input_series:
+      - series: 'up{job="sale-service", instance="sale-1:9080"}'
+        values: "1 1 0 0 0 0 0"
+      - series: 'up{job="sale-service", instance="sale-2:9080"}'
+        values: "1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, job: sale-service, instance: "sale-1:9080" }
+            exp_annotations:
+              summary: "sale-1:9080 (sale-service) is down"
+              description: "Prometheus has not been able to scrape it for a minute. Nginx routes around one sale instance; order-service has no replica."
+              runbook: "ARCHITECTURE.md §3"
+
+  - name: dead-lettered events alert with their reason
+    interval: 1m
+    input_series:
+      - series: 'flashsale_orders_dead_lettered_total{reason="invalid_event", job="order-service", instance="order-service:9091"}'
+        values: "0 0 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: OrderEventsDeadLettered
+        exp_alerts:
+          - exp_labels: { severity: warning, reason: invalid_event, job: order-service, instance: "order-service:9091" }
+            exp_annotations:
+              summary: "Order events were parked on order-created.DLT (invalid_event)"
+              description: "Each one is a buyer holding a unit without an order. Inspect with GET /admin/dead-letters, fix the cause, then POST /admin/dead-letters/replay."
+              runbook: "ARCHITECTURE.md §10 Order creation"
+
+  - name: 5xx above 2% for two minutes, but the normal 410 flood is not an error
+    interval: 30s
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="sale-service", status="410", uri="/sales/{saleId}/buy"}'
+        values: "0+1000x12"
+      - series: 'http_server_requests_seconds_count{job="sale-service", status="503", uri="/sales/{saleId}/buy"}'
+        values: "0 0 0 0+100x9"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: HighServerErrorRate
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HighServerErrorRate
+        exp_alerts:
+          - exp_labels: { severity: warning, job: sale-service }
+            exp_annotations:
+              summary: "More than 2% of sale-service requests fail with 5xx"
+              description: "Usually Redis, Kafka or PostgreSQL trouble: the services answer 503 TRY_AGAIN when a store is down."
+              runbook: "README.md Failure scenarios"
+
+  - name: consumer lag alerts only when sustained
+    interval: 30s
+    input_series:
+      - series: 'kafka_consumer_fetch_manager_records_lag{topic="order-created", partition="0"}'
+        values: "0 900 0 0 0 0 0 0 0 0"
+      - series: 'kafka_consumer_fetch_manager_records_lag{topic="order-created", partition="1"}'
+        values: "0 0 0 600 600 600 600 600 600 600"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: OrderConsumerLagging
+        exp_alerts: []
+      - eval_time: 4m30s
+        alertname: OrderConsumerLagging
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "order-service is 600 events behind on order-created"
+              description: "Winners are waiting for their order rows. Expected briefly during a spike; sustained lag usually means PostgreSQL is slow or down."
+              runbook: "ARCHITECTURE.md §8"
+
+  - name: oversell risk fires on the first-ever mismatch because the series is pre-registered at 0
+    interval: 1m
+    input_series:
+      - series: 'flashsale_reconcile_mismatch_total{direction="redis_high", instance="order-service:9091", job="order-service"}'
+        values: "0 0 0 1 1"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: OversellRisk
+        exp_alerts:
+          - exp_labels: { severity: critical, direction: redis_high, instance: "order-service:9091", job: order-service }
+            exp_annotations:
+              summary: "Redis stock is higher than PostgreSQL allows — oversell risk"
+              description: "Reconciliation found Redis stock above total_stock minus held orders. Stop the sale (delete sale:{id}:window) and investigate before more units are sold."
+              runbook: "ARCHITECTURE.md §10 Reconciliation"
+

@@ -91,6 +91,22 @@ The race (200 users, 10 units) also still gives exactly 10 winners, and the 1-mi
 ```
 </details>
 
+## Over HTTPS (Step C)
+
+Since Step C the public API is HTTPS only, and k6 talks to `https://localhost:8443`. One run on the same machine: **exactly 100 winners, 0 errors, 100 orders in PostgreSQL, Redis stock 0**, at 991 req/s (p95 2.17 s). Each of the 1,000 virtual users opens a TLS connection (ECDHE handshake) on the same 4 cores that run everything else, and the JVMs had just restarted, so throughput drops further; correctness does not change.
+
+## Waiting room (Step C)
+
+`loadtest/waiting-room.js` on sale 2 (100 units, waiting room on, 200 admitted per second): 2,000 honest buyers join the queue, poll once a second and buy once admitted; 200 bots call buy directly.
+
+| Result | |
+| :-- | --: |
+| Orders won | **100** (exactly the stock) |
+| Bot buy attempts refused with `NOT_ADMITTED` | **200 of 200** (0 bot orders in PostgreSQL) |
+| Buyers admitted | 1,243 |
+| Buyers told `SOLD_OUT` while still waiting | 757 |
+| Failed requests | 0 of 5,567 |
+
 ## Setup
 
 | | |

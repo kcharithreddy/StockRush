@@ -26,7 +26,9 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: 6379
-      password: ${REDIS_PASSWORD}
+      # This service's own Redis user (infra/redis/users.acl.template), never the operator account.
+      username: sale-service
+      password: ${REDIS_SALE_PASSWORD}
       # Fail fast: a buy request must never hang on a sick Redis.
       timeout: 1s
       connect-timeout: 1s
@@ -44,6 +46,8 @@ spring:
         # Upper bound on when a send's final result is known (drives late compensation).
         request.timeout.ms: 5000
         delivery.timeout.ms: 10000
+        # Adds the request's request_id to every record (see RequestIdProducerInterceptor).
+        interceptor.classes: com.flashsale.sale.logging.RequestIdProducerInterceptor
 
 flashsale:
   security:
@@ -72,3 +76,9 @@ management:
     distribution:
       percentiles-histogram:
         http.server.requests: true
+
+logging:
+  pattern:
+    # Plain-text logs (local runs) show the request id too. Docker switches to JSON (ECS), see docker-compose.yml.
+    correlation: "[%X{request_id:-}] "
+
