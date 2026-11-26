@@ -28,6 +28,8 @@ x-sale-service: &sale-service
     REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     KAFKA: kafka:29092
     OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
+    # One JSON object per log line (Elastic Common Schema), including request_id.
+    LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
   depends_on:
     redis:
       condition: service_healthy
@@ -187,6 +189,7 @@ services:
       RESET_ENABLED: ${RESET_ENABLED:-false}
       ORDERS_PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-10}
       OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
     ports:
       # Admin endpoints (Keycloak admin role required) for operators on this machine only.
       - "127.0.0.1:8090:8090"

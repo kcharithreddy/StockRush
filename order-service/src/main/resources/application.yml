@@ -82,3 +82,9 @@ management:
     health:
       probes:
         enabled: true
+
+logging:
+  pattern:
+    # Plain-text logs (local runs) show the request id too. Docker switches to JSON (ECS), see docker-compose.yml.
+    correlation: "[%X{request_id:-}] "
+

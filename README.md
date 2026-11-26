@@ -228,6 +228,8 @@ Everything — k6, Nginx, both JVMs, order-service, Redis, Kafka, PostgreSQL, Ke
 
 ## Monitoring
 
+Every request gets an id from Nginx, returned as `X-Request-Id` and carried through both services and Kafka, so one purchase can be followed from the Nginx access log to the order being written; the services log JSON (Elastic Common Schema) in Docker.
+
 Prometheus scrapes both sale-service instances and order-service on their internal management ports every 5 s. Grafana loads the **StockRush — Flash Sale** dashboard automatically.
 
 | Metric | Meaning |
@@ -270,4 +272,3 @@ Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a v
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
 - **TLS** at Nginx and between services; Kafka SASL; per-service Redis ACL users.
 - **Alert delivery.** Alerts fire in Alertmanager but no receiver is configured; production would route `critical` to an on-call pager.
-- **Structured JSON logs** with request ids.

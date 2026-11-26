@@ -342,6 +342,13 @@ Both services: Actuator with `health,prometheus` exposed on the separate `MANAGE
 
 Prometheus (`infra/prometheus.yml`) scrapes `sale-1:9080`, `sale-2:9080` and `order-service:9091` every 5 s. Grafana provisions the datasource and the **StockRush — Flash Sale** dashboard from `infra/grafana/`. Its stat panels count exactly within the selected time range (`max_over_time − min_over_time`), not with `increase()`, whose extrapolation would show e.g. 313 for 300 orders.
 
+### Logs and request ids
+
+- Nginx gives every request an id (`$request_id`), always its own (a client cannot choose the id it is logged under), passes it upstream as `X-Request-Id` and returns it to the client. Its access log is one JSON line per request with that id, status, timing and the upstream instance.
+- Both services keep that id (or generate one when called directly), put it in the log context as `request_id` before Spring Security runs (so rejected requests are traceable too) and return it.
+- sale-service copies it onto the Kafka record as a `request_id` header (`RequestIdProducerInterceptor`); order-service restores it while processing the record (`RequestIdRecordInterceptor`), and a dead-lettered record keeps it. One id therefore links the Nginx line, sale-service's `Unit won` line and order-service's `Order created` line.
+- In Docker the services log one JSON object per line in Elastic Common Schema (`LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs`), ready for Loki, Elasticsearch or CloudWatch; local runs keep plain text with the id in brackets. Only winners are logged at INFO, never the flood of sold-out answers.
+
 ### Alerts
 
 Rules in `infra/alerting/alerts.yml`, loaded by Prometheus and sent to Alertmanager (http://localhost:9093). `infra/alerting/alerts.test.yml` unit-tests them with `promtool`, and CI runs those tests on every pull request.
@@ -495,6 +502,6 @@ docker compose run --rm db-migrate info   # show migration history
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
 - Image scanning in CI; branch protection on `main`.
-- Structured JSON logs with request ids.
+- ~~Structured JSON logs with request ids~~ — done: see §13 Logs and request ids.
 - ~~Alerts~~ — done: see §13 Alerts.
 

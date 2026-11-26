@@ -109,6 +109,7 @@ public class BuyService {
 
         try {
             send.get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            log.info("Unit won in sale {}: order {} published", event.saleId(), event.orderToken());
             return BuyResult.success(event.orderToken());
         } catch (ExecutionException e) {
             // Kafka reported the send as failed: give the unit back.

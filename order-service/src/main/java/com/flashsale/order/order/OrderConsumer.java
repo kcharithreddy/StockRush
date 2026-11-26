@@ -38,7 +38,7 @@ public class OrderConsumer {
 
         if (orders.insertPending(token, event.saleId(), userId)) {
             metrics.created();
-            log.debug("Created order {} for user {} in sale {}", token, userId, event.saleId());
+            log.info("Order {} created in sale {}", token, event.saleId());
         } else {
             log.info("Duplicate order-created event ignored: token={} sale={} user={}",
                     token, event.saleId(), event.userId());
