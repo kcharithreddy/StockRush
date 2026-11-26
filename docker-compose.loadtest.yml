@@ -1,9 +1,29 @@
-# Load-test override: turns off the per-IP rate limit in Nginx (all k6 traffic comes from one IP).
-#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx
+# Load-test override. Do not use for anything else.
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d
 # Back to normal:
-#   docker compose up -d nginx
+#   docker compose up -d
+#
+# 1. Turns off the per-IP rate limit in Nginx (all k6 traffic comes from one IP).
+# 2. Makes the services also accept tokens from the "stockrush-loadtest" issuer, HMAC-signed with
+#    LOADTEST_JWT_SECRET, so k6 can act as 20 000 distinct users without 20 000 Keycloak logins.
+#    Keycloak tokens keep working. The normal stack never sets this secret, so it never trusts that issuer.
+x-loadtest-issuer: &loadtest-issuer
+  LOADTEST_JWT_SECRET: ${LOADTEST_JWT_SECRET:?set LOADTEST_JWT_SECRET in .env (32+ characters)}
+
 services:
   nginx:
     volumes: !override
       - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./loadtest/nginx-no-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
+
+  sale-1:
+    environment:
+      <<: *loadtest-issuer
+
+  sale-2:
+    environment:
+      <<: *loadtest-issuer
+
+  order-service:
+    environment:
+      <<: *loadtest-issuer

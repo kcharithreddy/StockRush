@@ -53,6 +53,15 @@ flashsale:
   admin:
     # POST /admin/sales/{id}/reset deletes orders. Off unless explicitly enabled (local testing only).
     reset-enabled: ${RESET_ENABLED:false}
+  security:
+    # Tokens must carry exactly this issuer (Keycloak's public URL, see KC_HOSTNAME in docker-compose.yml)
+    issuer: ${OIDC_ISSUER:http://localhost:8180/realms/stockrush}
+    # Where to fetch Keycloak's signing keys; inside Docker this is the internal keycloak:8080 address.
+    jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/stockrush/protocol/openid-connect/certs}
+    audience: stockrush-api
+    # Load tests only: when set (32+ characters), tokens from the "stockrush-loadtest" issuer signed
+    # with this HMAC secret are also accepted. Never set in a normal deployment.
+    loadtest-secret: ${LOADTEST_JWT_SECRET:}
 
 management:
   # Health and metrics live on a separate port that is never published outside the Docker network.

@@ -3,21 +3,33 @@
 // 1000 virtual users share 20 000 buy attempts against one sale; every attempt is a different user.
 // The test passes only if exactly STOCK attempts win and no request fails with a 5xx.
 //
-// Before running: reset the sale and switch off the per-IP limit in Nginx (all k6 traffic is one IP):
-//   curl -X POST localhost:8090/admin/sales/1/reset
-//   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx
+// Every attempt carries its own bearer token for a distinct user. k6 signs these itself as the
+// "stockrush-loadtest" issuer (HS256 with LOADTEST_JWT_SECRET), which the services accept only when
+// started with docker-compose.loadtest.yml. That override also switches off the per-IP limit in Nginx.
+//
+//   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d
+//   scripts/token.sh shopadmin | xargs -I{} curl -X POST -H "Authorization: Bearer {}" localhost:8090/admin/sales/1/reset
+//   set -a; . ./.env; set +a
 // Run with a local k6:
-//   k6 run loadtest/flash-sale.js
+//   k6 run -e LOADTEST_JWT_SECRET loadtest/flash-sale.js
 // or with Docker:
-//   docker run --rm -i --network host -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
+//   docker run --rm -i --network host -e LOADTEST_JWT_SECRET -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
 
 import http from 'k6/http';
 import { check } from 'k6';
+import crypto from 'k6/crypto';
+import encoding from 'k6/encoding';
 import { Counter } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const SALE_ID = __ENV.SALE_ID || '1';
 const STOCK = Number(__ENV.STOCK || 100);
+const VUS = Number(__ENV.VUS || 1000);
+const ITERATIONS = Number(__ENV.ITERATIONS || 20000);
+const SECRET = __ENV.LOADTEST_JWT_SECRET;
+if (!SECRET || SECRET.length < 32) {
+  throw new Error('Set LOADTEST_JWT_SECRET (32+ characters, same value as in .env)');
+}
 
 // 202 (won) and 410 (sold out) are both correct answers; only anything else counts as http_req_failed.
 http.setResponseCallback(http.expectedStatuses(202, 410));
@@ -30,8 +42,8 @@ export const options = {
   scenarios: {
     flash_sale: {
       executor: 'shared-iterations',
-      vus: 1000,
-      iterations: 20000,
+      vus: VUS,
+      iterations: ITERATIONS,
       maxDuration: '2m',
     },
   },
@@ -45,12 +57,35 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
+const b64url = (s) => encoding.b64encode(s, 'rawurl');
+const HEADER = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+
+/** A short-lived token for one user, signed like the services expect from the load-test issuer. */
+function tokenFor(userId) {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = b64url(JSON.stringify({
+    iss: 'stockrush-loadtest',
+    aud: 'stockrush-api',
+    sub: userId,
+    iat: now,
+    exp: now + 300,
+    realm_access: { roles: ['buyer'] },
+  }));
+  const signature = crypto.hmac('sha256', SECRET, `${HEADER}.${payload}`, 'base64rawurl');
+  return `${HEADER}.${payload}.${signature}`;
+}
+
+/** Deterministic UUID per (VU, iteration): unique across the whole run. */
+function userIdFor(vu, iter) {
+  const n = (vu * 100000 + iter).toString(16).padStart(12, '0');
+  return `00000000-0000-4000-8000-${n}`;
+}
+
 export default function () {
-  // Unique per iteration: VU ids start at 1 and each VU runs far fewer than 100 000 iterations.
-  const userId = __VU * 100000 + __ITER;
+  const userId = userIdFor(__VU, __ITER);
 
   const res = http.post(`${BASE_URL}/sales/${SALE_ID}/buy`, null, {
-    headers: { 'X-User-Id': String(userId) },
+    headers: { Authorization: `Bearer ${tokenFor(userId)}` },
     tags: { name: 'buy' },
   });
 

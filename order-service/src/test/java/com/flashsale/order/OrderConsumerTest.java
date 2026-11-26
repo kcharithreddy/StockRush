@@ -17,15 +17,17 @@ class OrderConsumerTest extends IntegrationTest {
     @Autowired
     OrderConsumer consumer;
 
-    private static String event(String token, long saleId, long userId) {
-        return "{\"orderToken\":\"" + token + "\",\"saleId\":" + saleId + ",\"userId\":" + userId + "}";
+    private static final String USER = "00000000-0000-4000-8000-000000000042";
+
+    private static String event(String token, long saleId, String userId) {
+        return "{\"orderToken\":\"" + token + "\",\"saleId\":" + saleId + ",\"userId\":\"" + userId + "\"}";
     }
 
     @Test
     void createsPendingOrder() {
         String token = UUID.randomUUID().toString();
 
-        consumer.onOrderCreated(event(token, 1, 42));
+        consumer.onOrderCreated(event(token, 1, USER));
 
         assertThat(statusOf(UUID.fromString(token))).isEqualTo("PENDING_PAYMENT");
     }
@@ -35,7 +37,7 @@ class OrderConsumerTest extends IntegrationTest {
 
     @Test
     void redeliveredEventIsIgnored() {
-        String payload = event(UUID.randomUUID().toString(), 1, 42);
+        String payload = event(UUID.randomUUID().toString(), 1, USER);
         double createdBefore = meters.get("flashsale.orders.placed").counter().count();
 
         consumer.onOrderCreated(payload);
@@ -47,8 +49,8 @@ class OrderConsumerTest extends IntegrationTest {
 
     @Test
     void secondOrderForSameUserAndSaleIsIgnored() {
-        consumer.onOrderCreated(event(UUID.randomUUID().toString(), 1, 42));
-        consumer.onOrderCreated(event(UUID.randomUUID().toString(), 1, 42));
+        consumer.onOrderCreated(event(UUID.randomUUID().toString(), 1, USER));
+        consumer.onOrderCreated(event(UUID.randomUUID().toString(), 1, USER));
 
         assertThat(countOrders()).isEqualTo(1);
     }
@@ -57,11 +59,11 @@ class OrderConsumerTest extends IntegrationTest {
     void malformedEventsAreRejectedWithoutWriting() {
         assertThatThrownBy(() -> consumer.onOrderCreated("not json")).isInstanceOf(InvalidEventException.class);
         assertThatThrownBy(() -> consumer.onOrderCreated("")).isInstanceOf(InvalidEventException.class);
-        assertThatThrownBy(() -> consumer.onOrderCreated(event("not-a-uuid", 1, 42)))
+        assertThatThrownBy(() -> consumer.onOrderCreated(event("not-a-uuid", 1, USER)))
                 .isInstanceOf(InvalidEventException.class);
-        assertThatThrownBy(() -> consumer.onOrderCreated(event(UUID.randomUUID().toString(), 0, 42)))
+        assertThatThrownBy(() -> consumer.onOrderCreated(event(UUID.randomUUID().toString(), 0, USER)))
                 .isInstanceOf(InvalidEventException.class);
-        assertThatThrownBy(() -> consumer.onOrderCreated(event(UUID.randomUUID().toString(), 1, -1)))
+        assertThatThrownBy(() -> consumer.onOrderCreated(event(UUID.randomUUID().toString(), 1, "not-a-user")))
                 .isInstanceOf(InvalidEventException.class);
 
         assertThat(countOrders()).isZero();
@@ -69,7 +71,7 @@ class OrderConsumerTest extends IntegrationTest {
 
     @Test
     void unknownSaleIsANonRetryableIntegrityError() {
-        assertThatThrownBy(() -> consumer.onOrderCreated(event(UUID.randomUUID().toString(), 999, 42)))
+        assertThatThrownBy(() -> consumer.onOrderCreated(event(UUID.randomUUID().toString(), 999, USER)))
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 }

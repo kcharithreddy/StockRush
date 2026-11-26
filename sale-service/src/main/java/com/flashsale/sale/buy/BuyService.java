@@ -58,20 +58,20 @@ public class BuyService {
         }
     }
 
-    public BuyResult buy(long saleId, long userId) {
+    public BuyResult buy(long saleId, UUID userId) {
         BuyResult result = attempt(saleId, userId);
         buyCounters.get(result.outcome()).increment();
         return result;
     }
 
-    private BuyResult attempt(long saleId, long userId) {
+    private BuyResult attempt(long saleId, UUID userId) {
         if (soldOut.contains(saleId)) {
             return BuyResult.of(BuyOutcome.SOLD_OUT);
         }
 
         Long result = redis.execute(buyScript,
                 List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId), RedisKeys.window(saleId)),
-                Long.toString(userId));
+                userId.toString());
         if (result == null) {
             throw new IllegalStateException("buy.lua returned no result");
         }
@@ -85,7 +85,7 @@ public class BuyService {
         }
 
         String orderToken = UUID.randomUUID().toString();
-        return publish(new OrderCreatedEvent(orderToken, saleId, userId));
+        return publish(new OrderCreatedEvent(orderToken, saleId, userId.toString()));
     }
 
     private BuyResult publish(OrderCreatedEvent event) {
@@ -99,7 +99,7 @@ public class BuyService {
 
         CompletableFuture<SendResult<String, String>> send;
         try {
-            send = kafka.send(RedisConfig.ORDER_CREATED_TOPIC, Long.toString(event.userId()), payload);
+            send = kafka.send(RedisConfig.ORDER_CREATED_TOPIC, event.userId(), payload);
         } catch (RuntimeException e) {
             // Rejected before leaving the producer (e.g. no broker metadata): definitely not sent.
             log.warn("Kafka rejected {}, compensating", event, e);
@@ -145,7 +145,7 @@ public class BuyService {
 
     private void compensate(OrderCreatedEvent event) {
         redis.opsForValue().increment(RedisKeys.stock(event.saleId()));
-        redis.opsForSet().remove(RedisKeys.buyers(event.saleId()), Long.toString(event.userId()));
+        redis.opsForSet().remove(RedisKeys.buyers(event.saleId()), event.userId());
         soldOut.remove(event.saleId());
     }
 

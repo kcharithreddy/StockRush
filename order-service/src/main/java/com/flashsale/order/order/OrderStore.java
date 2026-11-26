@@ -22,7 +22,7 @@ public class OrderStore {
     }
 
     /** Idempotent: a redelivered event, or a second order for the same (sale, user), inserts nothing. */
-    public boolean insertPending(UUID orderToken, long saleId, long userId) {
+    public boolean insertPending(UUID orderToken, long saleId, UUID userId) {
         int rows = jdbc.update("""
                 INSERT INTO orders (order_token, sale_id, user_id, status)
                 VALUES (?, ?, ?, 'PENDING_PAYMENT')
@@ -32,7 +32,7 @@ public class OrderStore {
     }
 
     /** Status of the caller's own order. Someone else's token looks exactly like an unknown one. */
-    public Optional<String> findStatus(UUID orderToken, long userId) {
+    public Optional<String> findStatus(UUID orderToken, UUID userId) {
         List<String> rows = jdbc.queryForList(
                 "SELECT status FROM orders WHERE order_token = ? AND user_id = ?",
                 String.class, orderToken, userId);
@@ -40,7 +40,7 @@ public class OrderStore {
     }
 
     /** Pays the caller's order only if it is still awaiting payment. */
-    public boolean pay(UUID orderToken, long userId) {
+    public boolean pay(UUID orderToken, UUID userId) {
         int rows = jdbc.update("""
                 UPDATE orders SET status = 'PAID', updated_at = now()
                 WHERE order_token = ? AND user_id = ? AND status = 'PENDING_PAYMENT'

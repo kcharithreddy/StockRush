@@ -33,11 +33,12 @@ public class OrderConsumer {
     @KafkaListener(topics = KafkaConfig.ORDER_CREATED_TOPIC, concurrency = "3")
     public void onOrderCreated(String payload) {
         OrderCreatedEvent event = parse(payload);
-        UUID token = parseToken(event.orderToken());
+        UUID token = parseUuid(event.orderToken(), "order token");
+        UUID userId = parseUuid(event.userId(), "user id");
 
-        if (orders.insertPending(token, event.saleId(), event.userId())) {
+        if (orders.insertPending(token, event.saleId(), userId)) {
             metrics.created();
-            log.debug("Created order {} for user {} in sale {}", token, event.userId(), event.saleId());
+            log.debug("Created order {} for user {} in sale {}", token, userId, event.saleId());
         } else {
             log.info("Duplicate order-created event ignored: token={} sale={} user={}",
                     token, event.saleId(), event.userId());
@@ -54,17 +55,17 @@ public class OrderConsumer {
         } catch (JsonProcessingException e) {
             throw new InvalidEventException("Malformed order-created payload", e);
         }
-        if (event.saleId() <= 0 || event.userId() <= 0) {
+        if (event.saleId() <= 0) {
             throw new InvalidEventException("Invalid ids in " + event);
         }
         return event;
     }
 
-    private static UUID parseToken(String token) {
+    private static UUID parseUuid(String value, String what) {
         try {
-            return UUID.fromString(token);
+            return UUID.fromString(value);
         } catch (IllegalArgumentException | NullPointerException e) {
-            throw new InvalidEventException("Invalid order token: " + token, e);
+            throw new InvalidEventException("Invalid " + what + ": " + value, e);
         }
     }
 }

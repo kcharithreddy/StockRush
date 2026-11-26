@@ -23,7 +23,8 @@ import java.util.UUID;
         "spring.kafka.admin.auto-create=false",
         "flashsale.jobs.enabled=false",
         "flashsale.admin.reset-enabled=true",
-        "spring.data.redis.password="
+        "spring.data.redis.password=",
+        com.flashsale.order.security.TestTokens.SECRET_PROPERTY
 })
 public abstract class IntegrationTest {
 
@@ -60,7 +61,7 @@ public abstract class IntegrationTest {
         redis.getConnectionFactory().getConnection().serverCommands().flushAll();
     }
 
-    protected UUID insertOrder(long saleId, long userId, String status, int ageMinutes) {
+    protected UUID insertOrder(long saleId, UUID userId, String status, int ageMinutes) {
         UUID token = UUID.randomUUID();
         jdbc.update("""
                 INSERT INTO orders (order_token, sale_id, user_id, status, created_at)

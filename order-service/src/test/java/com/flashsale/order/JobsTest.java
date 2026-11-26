@@ -24,10 +24,10 @@ class JobsTest extends IntegrationTest {
     @Test
     void cancelsOnlyOverdueUnpaidOrdersAndReturnsTheirStock() {
         redis.opsForValue().set("sale:1:stock", "0");
-        UUID overdue = insertOrder(1, 1, "PENDING_PAYMENT", 20);
-        UUID overdue2 = insertOrder(1, 2, "PENDING_PAYMENT", 11);
-        UUID fresh = insertOrder(1, 3, "PENDING_PAYMENT", 2);
-        UUID paid = insertOrder(1, 4, "PAID", 30);
+        UUID overdue = insertOrder(1, UUID.randomUUID(), "PENDING_PAYMENT", 20);
+        UUID overdue2 = insertOrder(1, UUID.randomUUID(), "PENDING_PAYMENT", 11);
+        UUID fresh = insertOrder(1, UUID.randomUUID(), "PENDING_PAYMENT", 2);
+        UUID paid = insertOrder(1, UUID.randomUUID(), "PAID", 30);
         double expiredBefore = meters.get("flashsale.orders.expired").counter().count();
 
         assertThat(expiry.expireOverdue()).isEqualTo(2);
@@ -45,9 +45,9 @@ class JobsTest extends IntegrationTest {
 
     @Test
     void reconciliationReportsEachDirection() {
-        insertOrder(1, 1, "PENDING_PAYMENT", 0);
-        insertOrder(1, 2, "PAID", 0);
-        insertOrder(1, 3, "CANCELLED", 0);
+        insertOrder(1, UUID.randomUUID(), "PENDING_PAYMENT", 0);
+        insertOrder(1, UUID.randomUUID(), "PAID", 0);
+        insertOrder(1, UUID.randomUUID(), "CANCELLED", 0);
         // seeded sale has total_stock 100 → expected 98
 
         redis.opsForValue().set("sale:1:stock", "98");

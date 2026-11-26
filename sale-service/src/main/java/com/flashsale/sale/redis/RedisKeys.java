@@ -18,7 +18,7 @@ public final class RedisKeys {
         return "sale:" + saleId + ":window";
     }
 
-    public static String rateLimit(long userId, long epochSecond) {
+    public static String rateLimit(java.util.UUID userId, long epochSecond) {
         return "rl:" + userId + ":" + epochSecond;
     }
 }
