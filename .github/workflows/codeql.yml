@@ -30,6 +30,13 @@ jobs:
           cache: maven
           cache-dependency-path: "**/pom.xml"
 
+      # Fetch Maven (checksum-verified by the wrapper) before CodeQL starts tracing. Under the tracer the
+      # wrapper's download fails, which only shows when the Maven cache misses (for example after a pom change).
+      - name: Download Maven
+        run: |
+          (cd sale-service && ./mvnw -B -ntp -v)
+          (cd order-service && ./mvnw -B -ntp -v)
+
       - uses: github/codeql-action/init@v3
         with:
           languages: java-kotlin
