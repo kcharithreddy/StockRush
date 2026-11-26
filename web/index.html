@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StockRush</title>
+  <!-- Keycloak realm and client. Must match KC_HOSTNAME in docker-compose.yml and connect-src in infra/nginx.conf. -->
+  <meta name="stockrush-issuer" content="http://localhost:8180/realms/stockrush">
+  <meta name="stockrush-client" content="stockrush-web">
+  <meta name="stockrush-sale" content="1">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <span class="brand">StockRush</span>
+    <span class="who">
+      <span id="user" hidden></span>
+      <button id="login" class="link" type="button">Log in</button>
+      <button id="logout" class="link" type="button" hidden>Log out</button>
+    </span>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="product">
+      <p class="tag">Flash sale</p>
+      <h1 id="product">Phone X 128GB</h1>
+      <p class="price"><strong>₹49,999</strong> <s>₹79,999</s></p>
+
+      <div class="stock" aria-live="polite">
+        <div class="meter"><div id="meter-fill"></div></div>
+        <p id="stock-text">Checking stock…</p>
+      </div>
+
+      <button id="buy" class="primary" type="button" disabled>Buy now</button>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="queue" class="card" hidden aria-live="polite">
+      <h2>You are in the waiting room</h2>
+      <p>Lots of people are buying right now. Keep this page open: when it is your turn, we buy for you automatically.</p>
+      <p class="big" id="queue-position"></p>
+    </section>
+
+    <section id="order" class="card" hidden aria-live="polite">
+      <h2>Your order</h2>
+      <p id="order-status"></p>
+      <button id="pay" class="primary" type="button" hidden>Pay ₹49,999</button>
+      <p class="hint" id="order-hint"></p>
+    </section>
+  </main>
+
+  <footer>Demo shop for the StockRush flash-sale backend. Payment is simulated; no money moves.</footer>
+</body>
+</html>

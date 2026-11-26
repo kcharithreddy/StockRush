@@ -1,3 +1,5 @@
-# Only the built jar is needed in the image.
-*
-!target/*.jar
+# The image is built from sources; local build output and IDE files stay out of the build context.
+target/
+.idea/
+*.iml
+.vscode/

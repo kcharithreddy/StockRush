@@ -96,6 +96,13 @@ class DeadLetterTest extends IntegrationTest {
             assertThat(d.originalTopic()).isEqualTo(KafkaConfig.ORDER_CREATED_TOPIC);
             assertThat(d.key()).isEqualTo(key);
         });
+        // The shareable summary counts by exception class and carries no key, payload or error text.
+        DeadLetterService.Summary summary = deadLetters.summary();
+        assertThat(summary.pending()).isEqualTo(2);
+        assertThat(summary.byCause().values().stream().mapToInt(Integer::intValue).sum()).isEqualTo(2);
+        assertThat(summary.byCause()).containsKey("InvalidEventException");
+        assertThat(summary.oldest()).isNotNull().isBeforeOrEqualTo(summary.newest());
+        assertThat(summary.toString()).doesNotContain(user.toString(), "not json", "foreign key", "sale_id");
         double parkedAfter = meters.find("flashsale.orders.dead.lettered").counters().stream()
                 .mapToDouble(c -> c.count()).sum();
         assertThat(parkedAfter - parkedBefore).isEqualTo(2);

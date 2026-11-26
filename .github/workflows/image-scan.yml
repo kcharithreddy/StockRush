@@ -31,17 +31,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: maven
-          cache-dependency-path: ${{ matrix.service }}/pom.xml
-
-      - name: Build jar and image
-        run: |
-          (cd ${{ matrix.service }} && ./mvnw -B -ntp -DskipTests package)
-          docker build -t "$IMAGE" ${{ matrix.service }}
+      # The Dockerfile compiles the service itself, so this also proves the image builds from a clean checkout.
+      - name: Build image from source
+        run: docker build -t "$IMAGE" ${{ matrix.service }}
 
       # Everything fixable and HIGH or worse goes to Security → Code scanning, alongside CodeQL.
       - name: Scan (report)

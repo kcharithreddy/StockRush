@@ -107,6 +107,19 @@ Since Step C the public API is HTTPS only, and k6 talks to `https://localhost:84
 | Buyers told `SOLD_OUT` while still waiting | 757 |
 | Failed requests | 0 of 5,567 |
 
+## Spring Boot 4.2 vs 3.5
+
+Same machine, same stack, same `flash-sale.js`, back-to-back runs alternating the two builds (the machine was busier than during the earlier runs, so compare these rows with each other, not with the tables above):
+
+| Build | Run | Winners | Unexpected / failed | Requests/s | p95 |
+|---|---|---|---|---|---|
+| Spring Boot 3.5.16 | 1 | 100 | 0 | 915 | 2.27 s |
+| Spring Boot 4.2.0 | 1 | 100 | 0 | 1008 | 2.09 s |
+| Spring Boot 3.5.16 | 2 | 100 | 0 | 883 | 2.53 s |
+| Spring Boot 4.2.0 | 2 | 100 | 0 | 902 | 2.27 s |
+
+The upgrade keeps the guarantee (exactly 100 winners every run) and performs the same or slightly better.
+
 ## Setup
 
 | | |
@@ -117,7 +130,7 @@ Since Step C the public API is HTTPS only, and k6 talks to `https://localhost:84
 | Rate limits | Per-IP Nginx limit off (`docker-compose.loadtest.yml`; all k6 traffic is one IP). Per-user limit on. |
 | Identity | Phase 4 runs: mock `X-User-Id` header. Step B runs: one HS256 bearer token per attempt from the load-test issuer, verified by the services. |
 | Machine | One 4-vCPU Intel Xeon @ 2.1 GHz, 16 GB RAM, running **everything**: k6, Nginx, both sale-service JVMs, order-service, Redis, Kafka, PostgreSQL, Prometheus and Grafana |
-| Versions | Java 17 (Temurin), Spring Boot 3.5.16, Keycloak 26.4.0 (Step B runs), Redis 7.4.12, Kafka 3.8.0, PostgreSQL 16.16, Nginx 1.27.5, k6 1.2.0 |
+| Versions | Java 17 (Temurin), Spring Boot 3.5.16 (4.2.0 for the comparison above), Keycloak 26.4.0 (Step B runs), Redis 7.4.12, Kafka 3.8.0, PostgreSQL 16.16, Nginx 1.27.5, k6 1.2.0 |
 
 Throughput and latency are limited by the shared 4-core machine (k6 alone generates 1000 concurrent connections), not by the design. The correctness result is what this test exists to prove; the latency numbers are a baseline, not a capacity claim.
 
@@ -125,8 +138,6 @@ Throughput and latency are limited by the shared 4-core machine (k6 alone genera
 
 ```bash
 cp .env.example .env                                   # once
-(cd sale-service && ./mvnw -DskipTests package)
-(cd order-service && ./mvnw -DskipTests package)
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build
 set -a; . ./.env; set +a                               # LOADTEST_JWT_SECRET for k6
 

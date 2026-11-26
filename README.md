@@ -63,27 +63,35 @@ flowchart LR
 | **PostgreSQL** | Source of truth for orders. |
 | **Prometheus + Grafana** | Metrics and the provisioned dashboard above. |
 
-Tech: Java 17, Spring Boot 3.5, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
+Tech: Java 17, Spring Boot 4.2, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
 
 ## Run it
 
-Requires Docker and Java 17+.
+Requires only Docker (with Compose). The Java services are compiled inside Docker; no local Java or Maven is needed to run the project.
 
 ```bash
 cp .env.example .env              # then change the passwords in .env
 scripts/dev-cert.sh               # local CA + certificate for https://localhost:8443 (git-ignored)
-(cd sale-service && ./mvnw -DskipTests package)
-(cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build
 ```
 
-Log in as the demo users (`buyer1`, `buyer2`, `shopadmin`; password `DEMO_USER_PASSWORD` from `.env`), open the sale and buy:
+Open the sale (the shop admin warms it up: loads the stock into Redis and sets its time window):
 
 ```bash
-ADMIN=$(scripts/token.sh shopadmin)
+curl -X POST -H "Authorization: Bearer $(scripts/token.sh shopadmin)" localhost:8090/admin/sales/1/warmup   # → {"saleId":1,"stock":100}
+```
+
+Then open the shop page at **https://localhost:8443** (your browser trusts it once you import `infra/tls/ca.crt`, or click through the warning) and log in as `buyer1` or `buyer2`, password `DEMO_USER_PASSWORD` from `.env`. The page shows live stock, buys, waits for the order and lets you pay (simulated). https://localhost:8443/?sale=2 is the sale sold through the [waiting room](#waiting-room-optional-per-sale): the page queues you and buys automatically when you are admitted (warm sale 2 up first).
+
+<img src="docs/shop-page.png" alt="The shop page after a successful buy: stock meter, order reserved, Pay button" width="360">
+
+> Already ran StockRush before the shop page existed? Keycloak keeps its realm, so point the web login at the page once: `scripts/keycloak-web-client.sh`.
+
+The same with curl, as the demo users (`buyer1`, `buyer2`, `shopadmin`; password `DEMO_USER_PASSWORD` from `.env`):
+
+```bash
 BUYER=$(scripts/token.sh buyer1)
 
-curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/warmup        # → {"saleId":1,"stock":100}
 curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $BUYER" https://localhost:8443/sales/1/buy                 # → {"status":"PROCESSING","orderToken":"…"}
 curl --cacert infra/tls/ca.crt -H "Authorization: Bearer $BUYER" https://localhost:8443/orders/<orderToken>                 # → {"status":"PENDING_PAYMENT"}
 curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $BUYER" https://localhost:8443/orders/<orderToken>/pay     # → {"status":"PAID"}
@@ -94,7 +102,7 @@ Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 
 | URL | What |
 | :-- | :-- |
-| https://localhost:8443 | API (Nginx, TLS 1.2/1.3); http://localhost:8080 redirects here |
+| https://localhost:8443 | Shop page and API (Nginx, TLS 1.2/1.3); http://localhost:8080 redirects here |
 | http://localhost:8090 | order-service admin (host only) |
 | http://localhost:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`) |
 | http://localhost:9090 | Prometheus |
@@ -122,6 +130,7 @@ The run passes only if exactly 100 attempts win and nothing returns an unexpecte
 ### Tests
 
 ```bash
+# Running the tests needs JDK 17 (set JAVA_HOME to it), `unzip`, and Docker for Testcontainers.
 (cd sale-service && ./mvnw verify)     # includes a Testcontainers race: 200 buyers, 10 units, exactly 10 winners
 (cd order-service && ./mvnw verify)    # idempotent consumer, payment, timeouts, reconciliation on real PostgreSQL + Redis
 ```
@@ -261,8 +270,9 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 
 ## Security
 
+- **Shop page:** logs in with the authorization code flow and PKCE, keeps tokens in memory only (never in browser storage), sends no cookies to the API, and runs under a strict Content Security Policy (scripts and styles from this server only; network calls only to this server and Keycloak). Plain JavaScript with no third-party code.
 - **Identity:** users authenticate with Keycloak. Every protected request carries a short-lived access token whose signature, issuer, audience and expiry are checked; the user id is the token's subject. Buying and orders need the `buyer` role, `/admin/**` the `admin` role. Forged, tampered, expired or foreign tokens get 401.
-- Only Nginx is published beyond `127.0.0.1`. It serves HTTPS only (TLS 1.2/1.3, HSTS and strict security headers; plain HTTP gets a 308 redirect) and routes `/sales/*` and `/orders/*`, nothing else.
+- Only Nginx is published beyond `127.0.0.1`. It serves HTTPS only (TLS 1.2/1.3, HSTS and strict security headers; plain HTTP gets a 308 redirect) and serves the shop page plus `/sales/*` and `/orders/*`, nothing else.
 - Every password comes from a git-ignored `.env`; services refuse to start without them.
 - Each service has its own Redis user that can reach only its keys and the exact commands it needs (no FLUSHALL, KEYS or CONFIG); services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
 - Containers run as a non-root user with a read-only filesystem, no Linux capabilities and a memory limit.
@@ -270,6 +280,16 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 - Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL, Dependabot, and a Trivy scan of both container images on every pull request.
 
 Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a vulnerability: [SECURITY.md](SECURITY.md).
+
+## Ops assistant (optional)
+
+Set `OPENAI_API_KEY` in `.env`, restart order-service, then ask for an AI-written status report:
+
+```bash
+curl -X POST -H "Authorization: Bearer $(scripts/token.sh shopadmin)" localhost:8090/admin/assistant/summary
+```
+
+It sends only aggregate numbers (stock, order counts per status, dead-letter counts, firing alert names), never user ids or order data; `GET /admin/assistant/facts` shows exactly what would be sent, for free. Off without a key, admin-only, at most one call per 30 s. Details: §20 of [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Limitations and next steps
 

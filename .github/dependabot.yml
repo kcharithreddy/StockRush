@@ -1,6 +1,6 @@
 version: 2
 
-# Versions pinned by ARCHITECTURE.md §2 (Spring Boot 3, Kafka 3.8, Postgres 16, Redis 7) only
+# Versions pinned by ARCHITECTURE.md §2 (Spring Boot 4, Kafka 3.8, Postgres 16, Redis 7) only
 # receive updates inside that line. Moving to a new major is a deliberate decision, not a bot PR.
 # The Maven distribution and wrapper are pinned by checksum, so they are upgraded by hand
 # (download, verify Apache's SHA-512, update distributionSha256Sum).
@@ -44,7 +44,7 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "redis"
         update-types: ["version-update:semver-major"]
-      # The migration image must stay on the Flyway major the tests use (flyway-core from Spring Boot).
+      # The migration image must stay on the Flyway major the tests use (Flyway 12, managed by Spring Boot 4.2).
       - dependency-name: "flyway/flyway"
         update-types: ["version-update:semver-major"]
       # Keycloak majors change the realm format and admin APIs; upgrade deliberately.

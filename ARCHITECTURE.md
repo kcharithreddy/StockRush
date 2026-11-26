@@ -16,7 +16,7 @@ A flash-sale backend: thousands of users try to buy a small, fixed stock (e.g. 1
 
 | Concern | Choice |
 | :---- | :---- |
-| Language / framework | Java 17, Spring Boot 3.x, Maven (use the Maven wrapper `./mvnw`) |
+| Language / framework | Java 17, Spring Boot 4.x (Spring Framework 7, Jackson 3), Maven (use the Maven wrapper `./mvnw`; the wrapper needs `unzip`, since its download is pinned to the zip's checksum). Images are built from source in Docker (`maven:3.9.11-eclipse-temurin-17` build stage, JRE-only runtime stage), so running the stack needs no local JDK |
 | Hot state / atomic stock | Redis 7 with AOF (`--appendonly yes`), Lua scripts |
 | Async order pipeline | Apache Kafka 3.8 (KRaft mode, no ZooKeeper), image `apache/kafka:3.8.0` |
 | Database | PostgreSQL 16 |
@@ -94,6 +94,8 @@ flash-sale-system/
 │   └── src/main/resources/scripts/buy.lua
 ├── order-service/           # Spring Boot app, package com.flashsale.order
 │   └── Dockerfile
+├── web/                     # the shop page: index.html, app.js, app.css (static, no build step; served by Nginx)
+├── scripts/                 # dev-cert.sh, token.sh, keycloak-web-client.sh
 ├── docker-compose.loadtest.yml  # override: per-IP limit off for k6
 ├── loadtest/
 │   ├── flash-sale.js
@@ -142,7 +144,7 @@ Money is always integer paise. Never floats.
 
 **Who can do what.** `postgres` (superuser) only creates the two roles and hands the `public` schema to `flashsale_migrator` (`infra/db-init/02-app-user.sh`). `flashsale_migrator` owns every table and is used only by the one-shot `db-migrate` container. The services connect as `DB_USER`, which gets exactly the grants each migration gives it (`${app_user}` placeholder): `SELECT` on `products` and `flash_sales`, `SELECT/INSERT/UPDATE/DELETE` on `orders`. It cannot create, alter or drop anything.
 
-**How migrations run.** On `docker compose up`, `db-migrate` (image `flyway/flyway:11.14.1`) applies any pending migrations as `flashsale_migrator` and exits; order-service waits for it to succeed (`service_completed_successfully`). order-service does not contain Flyway at all (it is a test-only dependency), and still validates the result at startup (`ddl-auto: validate`), so a schema that does not match the entities stops it from starting. Tests apply the same files through Flyway against PostgreSQL 16 in Testcontainers.
+**How migrations run.** On `docker compose up`, `db-migrate` (image `flyway/flyway:12.11.0`) applies any pending migrations as `flashsale_migrator` and exits; order-service waits for it to succeed (`service_completed_successfully`). order-service does not contain Flyway at all (it is a test-only dependency), and still validates the result at startup (`ddl-auto: validate`), so a schema that does not match the entities stops it from starting. Tests apply the same files through Flyway against PostgreSQL 16 in Testcontainers.
 
 **Rules for new migrations.**
 
@@ -233,6 +235,8 @@ A token is accepted only if all of these hold: valid RS256 signature from the re
 | `GET /orders/{token}` | `{"status": "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "PROCESSING"}` — PROCESSING if the caller has no such order (yet) |
 | `POST /orders/{token}/pay` | `UPDATE ... SET status='PAID' WHERE order_token=? AND user_id=? AND status='PENDING_PAYMENT'`; 200 `{"status":"PAID"}` if 1 row, else 409 `{"status":"NOT_PAYABLE"}` |
 | `POST /admin/sales/{id}/warmup` | stock in Redis = total_stock − count(orders PENDING_PAYMENT or PAID); sets `window`; returns `{"saleId","stock"}` |
+| `GET /admin/assistant/facts` | the aggregate snapshot the ops assistant would send (§20); no AI call |
+| `POST /admin/assistant/summary` | AI-written status report: 200 `{"summary","model","sentToModel"}`; 503 `ASSISTANT_DISABLED` without a key; 429 `TOO_SOON` (+`Retry-After`) within 30 s of the last call; 502 `AI_UNAVAILABLE` with only the provider's status and error code |
 | `POST /admin/sales/{id}/reset` | TEST ONLY: delete the sale's orders, delete `stock` and `buyers` keys, then warm-up. Exists only when `RESET_ENABLED=true`; otherwise 404 |
 
 Both `/orders` endpoints need the `buyer` role and only ever see the caller's own orders (`WHERE … AND user_id = <token sub>`): another user's token behaves exactly like an unknown one. A token that is not a UUID is 400. Nginx exposes `/orders/*` and `/sales/*` on :8080 and nothing else.
@@ -437,8 +441,6 @@ scripts/dev-cert.sh                       # once: local CA + certificate for htt
 TOKEN=$(scripts/token.sh buyer1)          # demo users: buyer1, buyer2, shopadmin (password DEMO_USER_PASSWORD)
 ADMIN=$(scripts/token.sh shopadmin)
 docker compose up -d                      # start everything
-(cd sale-service && ./mvnw -DskipTests package)
-(cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build              # rebuild services after code changes
 curl -X POST localhost:8090/admin/sales/1/reset
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d   # per-IP limit off, load-test issuer on
@@ -471,7 +473,7 @@ docker compose run --rm db-migrate info   # show migration history
 | Stack traces in responses | `server.error.include-message/stacktrace: never` |
 | Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
 | Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot, Trivy image scan (fails on fixable CRITICAL) |
-| Known CVEs in bundled libraries | Tomcat 10.1.59 and Netty 4.1.137 pinned in both poms over Spring Boot's managed versions (fixable CRITICALs found by Trivy). `.trivyignore.yaml` lists findings that do not apply, each with its reason and an expiry date after which the gate fails again: today two spring-webmvc 6.2.19 CVEs (XsltView rendering, SSE view fragments — neither service renders views); their only open-source fix is Spring Framework 7 / Spring Boot 4 |
+| Known CVEs in bundled libraries | Stay on a supported Spring Boot line (4.x) and take its managed Tomcat, Netty and Spring versions; override a version in the pom only when Trivy finds a fixable CRITICAL that Spring Boot has not shipped yet, and remove the override at the next Boot bump. `.trivyignore.yaml` lists findings that do not apply, each with its reason and an expiry date after which the gate fails again (empty today) |
 | Personal data in logs | Logs never contain order tokens, user ids or event payloads (CodeQL `java/sensitive-log`); the request id links log lines instead, and dead-lettered records keep the full payload on the DLT for admins |
 | Stray topics | Kafka `auto.create.topics.enable=false` |
 | Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |
@@ -533,3 +535,70 @@ A sale can be sold through a waiting room (`flash_sales.waiting_room`, migration
 **Load test** (`loadtest/waiting-room.js`): 2,000 honest buyers join, poll and buy once admitted, while 200 bots call buy directly. Exactly 100 honest buyers won, all 200 bot attempts got `NOT_ADMITTED` (0 bot orders in PostgreSQL), 757 waiting buyers were told `SOLD_OUT` instead of hammering buy, 0 errors.
 
 **Trade-off.** Admission is a fixed rate, not tied to remaining stock, so more people are admitted than there are units (1,243 for 100 in the load test); the extra admitted buyers simply get `410`. Admitting in proportion to remaining stock is a possible refinement. The waiting room limits who may buy; one-account-per-person still depends on account creation (CAPTCHA at sign-up is outside this project).
+
+## 19. Shop page (web/)
+
+A single static page that a buyer uses to log in, watch the stock, buy, wait in the waiting room and pay. Plain HTML, CSS and JavaScript: no framework, no third-party code, no build step. Nginx serves it at `https://localhost:8443/` from a read-only mount of `web/`, on the same origin as the API, so there is no CORS on the API.
+
+**Login.** OpenID Connect authorization code flow with PKCE (S256) against Keycloak's public client `stockrush-web`, written by hand in `app.js` (about 80 lines). The PKCE verifier, the `state` and the chosen sale wait in `sessionStorage` only for the round trip to Keycloak; `state` is checked on return. Access, refresh and ID tokens are kept **in memory only**: no script can find them in `localStorage` or cookies, and a reload goes back through Keycloak (instant while its session is alive). The access token is refreshed 30 s before it expires; logout ends the Keycloak session.
+
+**Calls.** Every API call sends `Authorization: Bearer …` and `credentials: "omit"`. Cookies ignore ports, so without that a cookie for `localhost` from another local app (Grafana's, for example) would reach the services and switch on their CSRF check for cookie-carrying requests (§17).
+
+**Flow.**
+
+1. The page polls `GET /sales/{id}/stock` every 2 s while it is visible.
+2. Buy sends `POST /sales/{id}/buy`, with these outcomes:
+   - `202`: the order token is kept in `sessionStorage` (per sale and user) and the page polls `GET /orders/{token}` until the order leaves `PROCESSING`.
+   - `NOT_ADMITTED`: the page joins the waiting room (`POST /sales/{id}/queue`), polls the queue every 2 s, and buys as soon as it is `ADMITTED`.
+   - `410`, `409`, `SALE_NOT_ACTIVE` and `429` each get a plain message.
+3. `PENDING_PAYMENT` shows a Pay button, which sends `POST /orders/{token}/pay`.
+
+The page treats the sale as sold out only when the server says so (`410`). A stock of 0 can also mean the sale has not been warmed up yet, and buy then answers `SALE_NOT_ACTIVE`.
+
+**Headers.** Nginx picks the Content Security Policy by path:
+
+- The page's four files get: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' http://localhost:8180; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. The Keycloak origin must match `stockrush-issuer` in `web/index.html` and `KC_HOSTNAME`.
+- The API keeps `default-src 'none'`.
+- The page's files are sent with `Cache-Control: no-cache`, so a new version shows at once.
+
+**Keycloak.** `stockrush-web` allows only `https://localhost:8443/*` and `https://127.0.0.1:8443/*` as redirect and post-logout URLs, and the same origins for CORS on the token endpoint. Keycloak imports the realm file only when the realm does not exist, so an existing installation is updated with `scripts/keycloak-web-client.sh`, which uses `kcadm` and is safe to re-run.
+
+**Tested** in Chromium (Playwright) against the running stack. These cases passed:
+
+- login, buy, reserve, pay, and resuming the order after a reload;
+- logout;
+- the waiting room on sale 2: `403` → queue → admitted → `202`;
+- already bought, a non-buyer account, sold out, and a sale that is not open.
+
+In every run, zero cookies reached the API and there were no console or CSP errors.
+
+## 20. Ops assistant (optional, OpenAI)
+
+An admin asks `POST /admin/assistant/summary` (order-service, `admin` role, not routed by Nginx) and gets a short plain-text status report written by an OpenAI chat model: overall status, problems with likely causes, and next steps using the admin endpoints.
+
+**What is sent.** Only `OpsFacts`, built by `OpsFactsCollector`. `GET /admin/assistant/facts` returns exactly the same snapshot without calling the AI. It contains:
+
+- Per sale: window state, total stock, stock in Redis, order counts by status, and `unaccounted = totalStock - (stockInRedis + PENDING_PAYMENT + PAID)`. 0 is healthy; positive means lost orders; negative means an oversell.
+- Dead letters counted by exception class (`DeadLetterService.summary()`). Never keys, payloads or exception messages: database and JSON errors quote the event's values.
+- Firing alerts from Alertmanager's v2 API: name, severity, summary and start time only.
+- `unavailable`: sources that could not be read. One failing source never fails the snapshot.
+
+No user id, order token or other personal data. A test fails if any UUID appears in what is sent.
+
+**Safeguards.**
+
+- Off unless `OPENAI_API_KEY` is set in `.env`; the key is never logged or returned (`AssistantProperties.toString()` masks it).
+- At most one AI call per 30 s, failed calls included, as a cost guard.
+- Output is capped at 600 tokens and the request has a 30 s timeout.
+- Provider errors return only the HTTP status and error code, because OpenAI's error messages can echo part of the key.
+- The model is configurable (`OPENAI_MODEL`, default `gpt-4o-mini`), as is the API root (`OPENAI_BASE_URL`, for OpenAI-compatible providers).
+
+**Tested** against a fake OpenAI endpoint and a fake Alertmanager (`AssistantTest`, 6 tests):
+
+- aggregates only, with no UUIDs;
+- the exact request sent (bearer key, model, instructions, snapshot);
+- error mapping without the key;
+- failed sources listed rather than fatal;
+- admin role required;
+- off without a key, and the rate limit.
+

@@ -76,6 +76,16 @@ flashsale:
     # Load tests only: when set (32+ characters), tokens from the "stockrush-loadtest" issuer signed
     # with this HMAC secret are also accepted. Never set in a normal deployment.
     loadtest-secret: ${LOADTEST_JWT_SECRET:}
+  assistant:
+    # Ops assistant (POST /admin/assistant/summary). Off unless OPENAI_API_KEY is set in .env.
+    # It sends aggregates only (see OpsFacts); GET /admin/assistant/facts shows exactly what would be sent.
+    api-key: ${OPENAI_API_KEY:}
+    model: ${OPENAI_MODEL:gpt-4o-mini}
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    alertmanager-url: ${ALERTMANAGER_URL:http://localhost:9093}
+    # Cost guard: at most one AI call per interval.
+    min-interval: 30s
+    timeout: 30s
 
 management:
   # Health and metrics live on a separate port that is never published outside the Docker network.

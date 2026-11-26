@@ -1,7 +1,7 @@
 package com.flashsale.sale.buy;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import com.flashsale.sale.config.RedisConfig;
 import com.flashsale.sale.redis.RedisKeys;
 import io.micrometer.core.instrument.Counter;
@@ -93,7 +93,7 @@ public class BuyService {
         String payload;
         try {
             payload = json.writeValueAsString(event);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             compensate(event);
             throw new IllegalStateException("Could not serialise the order event for sale " + event.saleId(), e);
         }

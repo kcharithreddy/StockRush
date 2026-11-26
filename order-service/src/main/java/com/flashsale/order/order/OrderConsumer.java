@@ -1,7 +1,7 @@
 package com.flashsale.order.order;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 import com.flashsale.order.config.KafkaConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,7 +51,7 @@ public class OrderConsumer {
         OrderCreatedEvent event;
         try {
             event = json.readValue(payload, OrderCreatedEvent.class);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new InvalidEventException("Malformed order-created payload", e);
         }
         if (event.saleId() <= 0) {
