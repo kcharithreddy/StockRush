@@ -27,6 +27,11 @@ spring:
     # Least-privilege role (infra/db-init/02-app-user.sh), never the Postgres superuser.
     username: ${DB_USER}
     password: ${DB_PASSWORD}
+    hikari:
+      # Wait up to 60 s for PostgreSQL at startup instead of failing at once. Compose orders startup only on
+      # `docker compose up`; after a Docker or host restart all containers come back together, and without this
+      # order-service crash-looped until PostgreSQL accepted connections.
+      initialization-fail-timeout: 60000
   jpa:
     open-in-view: false
     hibernate:
