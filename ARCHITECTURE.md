@@ -319,7 +319,7 @@ Each service reads env vars with local defaults so it runs from the IDE AND in D
 | `KAFKA` | localhost:9092 | localhost:9092 | kafka:29092 |
 | `DB_HOST` | — | localhost | postgres |
 | `MANAGEMENT_PORT` | 9081 | 9091 | 9080 for sale containers |
-| `REDIS_PASSWORD` | from `.env` | from `.env` | from `.env` |
+| `REDIS_SALE_PASSWORD` / `REDIS_ORDER_PASSWORD` | sale-service's Redis user (`sale-service`) | order-service's Redis user (`order-service`) | from `.env` |
 | `DB_USER` / `DB_PASSWORD` | — | from `.env` | from `.env` |
 | `RESET_ENABLED` | — | false | from `.env` |
 | `OIDC_ISSUER` | http://localhost:8180/realms/stockrush | same | same (Keycloak's public URL, `KC_HOSTNAME`) |
@@ -459,7 +459,7 @@ docker compose run --rm db-migrate info   # show migration history
 | :---- | :---- |
 | Infrastructure reachable from the network | Every compose port bound to `127.0.0.1` |
 | Eavesdropping / tampering on the public API | HTTPS only (TLS 1.2/1.3), HSTS, HTTP → 308 redirect |
-| Anyone editing stock or flushing Redis | `requirepass` from `.env` |
+| Anyone editing stock or flushing Redis | Redis ACL users (`infra/redis/users.acl.template`): `sale-service` may only touch `sale:*`/`rl:*` with the commands its Lua scripts use; `order-service` only `sale:*` with GET/SET/INCR/DEL; neither can FLUSHALL, KEYS, CONFIG or run anything else. The operator account (`default`, `REDIS_PASSWORD`) is for humans only. Passwords come from `.env` and are rendered into the ACL at container start |
 | App able to drop tables / read everything | Least-privilege `DB_USER`; schema owned by `flashsale_migrator`, used only by the one-shot `db-migrate` container; superuser only creates roles |
 | Secrets in git | `.env` git-ignored; no defaults for secrets; `.env.example` only |
 | Metrics and health leaking internals | Actuator on an internal management port |
@@ -500,7 +500,7 @@ docker compose run --rm db-migrate info   # show migration history
 ### Step C — after Phase 4
 
 - Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
-- ~~TLS at Nginx~~ — done: see §11. Kafka SASL; Redis ACL users per service.
+- ~~TLS at Nginx~~ — done: see §11. ~~Redis ACL users per service~~ — done: see the table above. Kafka SASL (Kafka is reachable only on the Docker network and `127.0.0.1`).
 - ~~Dead-letter topic for the consumer~~ — done: see §10, Order creation.
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.

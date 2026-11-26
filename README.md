@@ -259,7 +259,7 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 - **Identity:** users authenticate with Keycloak. Every protected request carries a short-lived access token whose signature, issuer, audience and expiry are checked; the user id is the token's subject. Buying and orders need the `buyer` role, `/admin/**` the `admin` role. Forged, tampered, expired or foreign tokens get 401.
 - Only Nginx is published beyond `127.0.0.1`. It serves HTTPS only (TLS 1.2/1.3, HSTS and strict security headers; plain HTTP gets a 308 redirect) and routes `/sales/*` and `/orders/*`, nothing else.
 - Every password comes from a git-ignored `.env`; services refuse to start without them.
-- Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
+- Each service has its own Redis user that can reach only its keys and the exact commands it needs (no FLUSHALL, KEYS or CONFIG); services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
 - Containers run as a non-root user with a read-only filesystem, no Linux capabilities and a memory limit.
 - `/orders` endpoints only ever show the caller's own orders. The test-only reset endpoint does not exist unless `RESET_ENABLED=true`.
 - Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL, Dependabot, and a Trivy scan of both container images on every pull request.
