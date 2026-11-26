@@ -91,6 +91,10 @@ The race (200 users, 10 units) also still gives exactly 10 winners, and the 1-mi
 ```
 </details>
 
+## Over HTTPS (Step C)
+
+Since Step C the public API is HTTPS only, and k6 talks to `https://localhost:8443`. One run on the same machine: **exactly 100 winners, 0 errors, 100 orders in PostgreSQL, Redis stock 0**, at 991 req/s (p95 2.17 s). Each of the 1,000 virtual users opens a TLS connection (ECDHE handshake) on the same 4 cores that run everything else, and the JVMs had just restarted, so throughput drops further; correctness does not change.
+
 ## Setup
 
 | | |

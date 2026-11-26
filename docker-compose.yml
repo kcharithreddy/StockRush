@@ -217,10 +217,12 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "8080:8080"
+      - "8443:8443"   # HTTPS (certificate from scripts/dev-cert.sh)
+      - "8080:8080"   # redirects to HTTPS
     volumes:
       - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./infra/nginx-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
+      - ./infra/tls:/etc/nginx/tls:ro
     depends_on:
       sale-1:
         condition: service_healthy

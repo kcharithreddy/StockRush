@@ -71,6 +71,7 @@ Requires Docker and Java 17+.
 
 ```bash
 cp .env.example .env              # then change the passwords in .env
+scripts/dev-cert.sh               # local CA + certificate for https://localhost:8443 (git-ignored)
 (cd sale-service && ./mvnw -DskipTests package)
 (cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build
@@ -83,17 +84,17 @@ ADMIN=$(scripts/token.sh shopadmin)
 BUYER=$(scripts/token.sh buyer1)
 
 curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/warmup        # → {"saleId":1,"stock":100}
-curl -X POST -H "Authorization: Bearer $BUYER" localhost:8080/sales/1/buy                 # → {"status":"PROCESSING","orderToken":"…"}
-curl -H "Authorization: Bearer $BUYER" localhost:8080/orders/<orderToken>                 # → {"status":"PENDING_PAYMENT"}
-curl -X POST -H "Authorization: Bearer $BUYER" localhost:8080/orders/<orderToken>/pay     # → {"status":"PAID"}
-curl localhost:8080/sales/1/stock                                                         # → {"stock":99} (public)
+curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $BUYER" https://localhost:8443/sales/1/buy                 # → {"status":"PROCESSING","orderToken":"…"}
+curl --cacert infra/tls/ca.crt -H "Authorization: Bearer $BUYER" https://localhost:8443/orders/<orderToken>                 # → {"status":"PENDING_PAYMENT"}
+curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $BUYER" https://localhost:8443/orders/<orderToken>/pay     # → {"status":"PAID"}
+curl --cacert infra/tls/ca.crt https://localhost:8443/sales/1/stock                      # → {"stock":99} (public)
 ```
 
 Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 
 | URL | What |
 | :-- | :-- |
-| http://localhost:8080 | API (Nginx) |
+| https://localhost:8443 | API (Nginx, TLS 1.2/1.3); http://localhost:8080 redirects here |
 | http://localhost:8090 | order-service admin (host only) |
 | http://localhost:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`) |
 | http://localhost:9090 | Prometheus |
@@ -256,7 +257,7 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 ## Security
 
 - **Identity:** users authenticate with Keycloak. Every protected request carries a short-lived access token whose signature, issuer, audience and expiry are checked; the user id is the token's subject. Buying and orders need the `buyer` role, `/admin/**` the `admin` role. Forged, tampered, expired or foreign tokens get 401.
-- Only Nginx is published beyond `127.0.0.1`; it routes `/sales/*` and `/orders/*` and nothing else.
+- Only Nginx is published beyond `127.0.0.1`. It serves HTTPS only (TLS 1.2/1.3, HSTS and strict security headers; plain HTTP gets a 308 redirect) and routes `/sales/*` and `/orders/*`, nothing else.
 - Every password comes from a git-ignored `.env`; services refuse to start without them.
 - Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
 - Containers run as a non-root user with a read-only filesystem, no Linux capabilities and a memory limit.

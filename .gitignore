@@ -23,3 +23,6 @@ buildNumber.properties
 .idea/
 *.iml
 .vscode/
+
+# Local TLS material (scripts/dev-cert.sh)
+infra/tls/

@@ -207,7 +207,7 @@ Every protected call carries `Authorization: Bearer <access token>`. The user id
 
 A token is accepted only if all of these hold: valid RS256 signature from the realm's JWKS, `iss` = `OIDC_ISSUER`, `aud` contains `stockrush-api`, not expired, and `sub` is a UUID. Missing or invalid token → 401; valid token without the role → 403. See §17 for the load-test issuer.
 
-### sale-service (behind Nginx at [http://localhost:8080](http://localhost:8080))
+### sale-service (behind Nginx at https://localhost:8443)
 
 `POST /sales/{saleId}/buy` (role `buyer`)
 
@@ -305,6 +305,7 @@ Every 60 s, for each sale currently within its window: `expected = total_stock �
 
 - **Per user (sale-service):** `HandlerInterceptor` on `/sales/*/buy`. Fixed window: `INCR rl:{userId}:{epochSecond}`, `EXPIRE 2` on first hit (both in `scripts/rate_limit.lua`, so they are atomic), reject with 429 above 5.
 - **Per IP (Nginx):** `limit_req_zone $binary_remote_addr zone=perip:10m rate=50r/s;` with `burst=100 nodelay`, `limit_req_status 429`. The limit applies to the buy route only and lives in `infra/nginx-ratelimit.conf`, which `nginx.conf` includes. For k6 runs (all k6 traffic is one IP) either comment out its `limit_req` line, or start Nginx with `docker-compose.loadtest.yml`, which mounts the empty `loadtest/nginx-no-ratelimit.conf` in its place.
+- **TLS (Nginx):** HTTPS on :8443 with TLS 1.2/1.3 only, ECDHE AEAD ciphers, no session tickets, HTTP/2. Every response carries HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: default-src 'none'`. Port 8080 only answers `308` to the HTTPS URL (308 keeps the method, so a POST is not turned into a GET). The certificate is in `infra/tls/` (git-ignored): `scripts/dev-cert.sh` creates a local CA and a `localhost` certificate; production puts a real one there. Inside the Docker network traffic stays plain HTTP (a private network with no published ports).
 - **Nginx routing (`infra/nginx.conf`):** `POST /sales/{id}/buy` and `GET /sales/{id}/stock` go round-robin to `sale-1`/`sale-2`; `/orders/{uuid}` and `/orders/{uuid}/pay` go to order-service; every other path (including `/admin/**` and `/actuator/**`) is 404. Upstreams use Docker DNS with `resolve`, so Nginx keeps running while an instance is down. Upstream connections are reused (`keepalive 512`, `keepalive_requests 100000`); an instance is skipped for 5 s after 3 failed connects (2 s connect timeout), so a burst cannot take both out of rotation. A failed connect is retried on the other instance, but a request that reached an instance is never resent, so a buy is never sent twice.
 
 ## 12. Configuration
@@ -403,7 +404,7 @@ Grafana panels (document the PromQL in README):
 
 ```sh
 curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/reset
-curl -X POST -H "Authorization: Bearer $TOKEN" localhost:8080/sales/1/buy
+curl --cacert infra/tls/ca.crt -X POST -H "Authorization: Bearer $TOKEN" https://localhost:8443/sales/1/buy
 docker compose exec redis redis-cli SET sale:1:stock 10
 seq 1 200 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
   -X POST -H "X-User-Id: {}" localhost:8081/sales/1/buy | sort | uniq -c
@@ -418,7 +419,7 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 - `OrderConsumer`, `OrderController` (status + pay), `PaymentTimeoutWorker`, `ReconciliationJob`.
 - Dockerfiles (`FROM eclipse-temurin:17-jre`, copy jar), compose services `sale-1`, `sale-2`, `order-service`, `nginx`; `infra/nginx.conf`.
 
-**Accept:** race test through `localhost:8080` (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` as the owner); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
+**Accept:** race test through Nginx (`localhost:8080` at the time; HTTPS on `localhost:8443` since Step C) (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` as the owner); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
 
 ### Phase 4 — Load test, monitoring, docs
 
@@ -432,6 +433,7 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 
 ```sh
 cp .env.example .env                      # once; then change the passwords
+scripts/dev-cert.sh                       # once: local CA + certificate for https://localhost:8443
 TOKEN=$(scripts/token.sh buyer1)          # demo users: buyer1, buyer2, shopadmin (password DEMO_USER_PASSWORD)
 ADMIN=$(scripts/token.sh shopadmin)
 docker compose up -d                      # start everything
@@ -456,6 +458,7 @@ docker compose run --rm db-migrate info   # show migration history
 | Threat | Control |
 | :---- | :---- |
 | Infrastructure reachable from the network | Every compose port bound to `127.0.0.1` |
+| Eavesdropping / tampering on the public API | HTTPS only (TLS 1.2/1.3), HSTS, HTTP → 308 redirect |
 | Anyone editing stock or flushing Redis | `requirepass` from `.env` |
 | App able to drop tables / read everything | Least-privilege `DB_USER`; schema owned by `flashsale_migrator`, used only by the one-shot `db-migrate` container; superuser only creates roles |
 | Secrets in git | `.env` git-ignored; no defaults for secrets; `.env.example` only |
@@ -497,7 +500,7 @@ docker compose run --rm db-migrate info   # show migration history
 ### Step C — after Phase 4
 
 - Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
-- TLS at Nginx; Kafka SASL; Redis ACL users per service.
+- ~~TLS at Nginx~~ — done: see §11. Kafka SASL; Redis ACL users per service.
 - ~~Dead-letter topic for the consumer~~ — done: see §10, Order creation.
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
