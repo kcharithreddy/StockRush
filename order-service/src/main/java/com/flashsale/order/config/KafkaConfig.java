@@ -1,11 +1,18 @@
 package com.flashsale.order.config;
 
 import com.flashsale.order.order.InvalidEventException;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.TopicPartition;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.ConsumerRecordRecoverer;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.DeserializationException;
 import org.springframework.util.backoff.ExponentialBackOff;
@@ -14,6 +21,10 @@ import org.springframework.util.backoff.ExponentialBackOff;
 public class KafkaConfig {
 
     public static final String ORDER_CREATED_TOPIC = "order-created";
+    public static final String DEAD_LETTER_TOPIC = ORDER_CREATED_TOPIC + ".DLT";
+    static final String DEAD_LETTER_METRIC = "flashsale.orders.dead.lettered";
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaConfig.class);
 
     /** Same definition as sale-service, so either service can start first. */
     @Bean
@@ -21,22 +32,49 @@ public class KafkaConfig {
         return TopicBuilder.name(ORDER_CREATED_TOPIC).partitions(3).replicas(1).build();
     }
 
+    /** Parking lot for records the consumer could not process. Same partition count: a record keeps its partition. */
+    @Bean
+    public NewTopic orderCreatedDeadLetterTopic() {
+        return TopicBuilder.name(DEAD_LETTER_TOPIC).partitions(3).replicas(1).build();
+    }
+
     /**
-     * Transient failures (database down, deadlock) are retried with exponential backoff:
-     * 0.5 s, 1 s, 2 s ... capped at 30 s, for up to 5 minutes. Records that can never succeed
-     * (malformed payload, unknown sale) are logged and skipped at once instead of blocking the
-     * partition. A dead-letter topic replaces the skip in Step C (ARCHITECTURE.md §17).
+     * Transient failures (database down, deadlock) are retried with exponential backoff: 0.5 s, 1 s, 2 s ...
+     * capped at 30 s, for up to 5 minutes. Records that can never succeed (malformed payload, unknown sale)
+     * are not retried. Either way, a record that is given up on is published to {@value #DEAD_LETTER_TOPIC}
+     * with the error in its headers, counted, and logged; the partition moves on instead of blocking.
+     * A buyer whose event lands there still holds a unit in Redis, so reconciliation reports redis_low
+     * until the record is replayed (POST /admin/dead-letters/replay) or the unit is released by hand.
      */
     @Bean
-    public DefaultErrorHandler kafkaErrorHandler() {
+    public DefaultErrorHandler kafkaErrorHandler(KafkaTemplate<String, String> template, MeterRegistry meters) {
+        DeadLetterPublishingRecoverer toDeadLetterTopic = new DeadLetterPublishingRecoverer(template,
+                (record, error) -> new TopicPartition(DEAD_LETTER_TOPIC, record.partition()));
+
+        ConsumerRecordRecoverer recoverer = (record, error) -> {
+            Throwable cause = rootCause(error);
+            log.error("Dead-lettering {}-{}@{} (key {}): {}: {}", record.topic(), record.partition(),
+                    record.offset(), record.key(), cause.getClass().getSimpleName(), cause.getMessage());
+            toDeadLetterTopic.accept(record, error);
+            meters.counter(DEAD_LETTER_METRIC, "reason", cause.getClass().getSimpleName()).increment();
+        };
+
         ExponentialBackOff backOff = new ExponentialBackOff(500, 2.0);
         backOff.setMaxInterval(30_000);
         backOff.setMaxElapsedTime(300_000);
-        DefaultErrorHandler handler = new DefaultErrorHandler(backOff);
+        DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
         handler.addNotRetryableExceptions(
                 InvalidEventException.class,
                 DataIntegrityViolationException.class,
                 DeserializationException.class);
         return handler;
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        return cause;
     }
 }

@@ -202,8 +202,8 @@ A user whose order expires stays in the buyers set and cannot buy again in that 
 | Kafka rejects the send or reports failure | The unit goes straight back (`INCR` stock, remove buyer). Client gets `503 TRY_AGAIN`. |
 | Kafka does not answer within 2 s | Client gets `503`, but the unit stays reserved until Kafka gives a final answer (≤ 10 s). Late success → the order is created normally. Late failure → the unit goes back. Never sold twice. Tested by stopping Kafka mid-run. |
 | Redis down | `503 TRY_AGAIN` with `Retry-After: 1` within 1 s. No thread hangs. |
-| PostgreSQL down | Orders wait in Kafka. The consumer retries with backoff (0.5 s → 30 s, up to 5 minutes), then catches up. |
-| A malformed or unknown-sale event | Logged and skipped immediately, so one bad record cannot block a partition. |
+| PostgreSQL down | Orders wait in Kafka. The consumer retries with backoff (0.5 s → 30 s, up to 5 minutes), then catches up. If the outage outlasts that, the events are parked on the dead-letter topic and replayed with one admin call once the database is back. |
+| A malformed or unknown-sale event | Parked at once on `order-created.DLT` with its error, so one bad record cannot block a partition. Operators list parked events with `GET /admin/dead-letters` and replay them after fixing the cause with `POST /admin/dead-letters/replay` (safe: the consumer is idempotent). |
 | One sale-service instance dies | Nginx sends traffic to the other. A failed connect is retried on the other instance; a request that already reached an instance is never resent, so a buy is never duplicated. Tested with `docker compose stop sale-1`. |
 | order-service crashes between cancel and stock restore | Redis is one unit low (safe direction). Reconciliation reports `redis_low`. |
 | Redis and PostgreSQL disagree | The reconciliation job (every 60 s) logs and counts it: `redis_high` (oversell risk, ERROR) or `redis_low`. It reports only; it never auto-corrects. |
@@ -235,6 +235,7 @@ Prometheus scrapes both sale-service instances and order-service on their intern
 | `flashsale_orders_placed_total` | Orders written by the consumer (duplicates excluded) |
 | `flashsale_orders_paid_total` / `flashsale_orders_expired_total` | Payments and timeout cancellations |
 | `flashsale_reconcile_mismatch_total{direction}` | `redis_high` (must stay 0) / `redis_low` |
+| `flashsale_orders_dead_lettered_total{reason}` | Order events parked on the dead-letter topic, by cause |
 
 Dashboard PromQL:
 
@@ -266,6 +267,5 @@ Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a v
 - **Keycloak runs in development mode** (plain HTTP, a password-grant client for scripts). Production: `start` behind TLS with a real hostname, and only the browser client with PKCE.
 - **Bots.** One account per purchase is only as strong as account creation. Next: a virtual waiting room / queue token before the sale opens, CAPTCHA on suspicious traffic.
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
-- **Poison messages are skipped, not parked.** Next: a dead-letter topic.
 - **TLS** at Nginx and between services; Kafka SASL; per-service Redis ACL users.
 - **Alerts** on `redis_high`, consumer lag and 5xx rate; structured JSON logs with request ids.
