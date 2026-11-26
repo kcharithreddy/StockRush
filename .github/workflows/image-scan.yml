@@ -1,0 +1,63 @@
+name: Image scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # New CVEs appear in unchanged images too: rescan weekly.
+    - cron: "41 4 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    name: Scan ${{ matrix.service }} image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [sale-service, order-service]
+    env:
+      IMAGE: stockrush/${{ matrix.service }}:ci
+      TRIVY: aquasec/trivy:0.64.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: ${{ matrix.service }}/pom.xml
+
+      - name: Build jar and image
+        run: |
+          (cd ${{ matrix.service }} && ./mvnw -B -ntp -DskipTests package)
+          docker build -t "$IMAGE" ${{ matrix.service }}
+
+      # Everything fixable and HIGH or worse goes to Security → Code scanning, alongside CodeQL.
+      - name: Scan (report)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" "$TRIVY" image \
+            --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --format sarif --output /out/trivy.sarif "$IMAGE"
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-${{ matrix.service }}
+
+      # The gate: a fixable CRITICAL vulnerability in the OS packages or the jar's libraries fails the build.
+      - name: Scan (gate on fixable CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY" image \
+            --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"

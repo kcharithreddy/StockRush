@@ -467,7 +467,7 @@ docker compose run --rm db-migrate info   # show migration history
 | Instance clock skew deciding the sale window | `buy.lua` uses Redis `TIME` |
 | Stack traces in responses | `server.error.include-message/stacktrace: never` |
 | Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
-| Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot |
+| Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot, Trivy image scan (fails on fixable CRITICAL) |
 | Stray topics | Kafka `auto.create.topics.enable=false` |
 | Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |
 | Internal endpoints reachable from outside | Nginx routes only `/sales/*` and `/orders/*`; sale containers are not published; order-service on `127.0.0.1` only |
@@ -501,7 +501,8 @@ docker compose run --rm db-migrate info   # show migration history
 - ~~Dead-letter topic for the consumer~~ — done: see §10, Order creation.
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
-- Image scanning in CI; branch protection on `main`.
+- ~~Image scanning in CI~~ — done: `.github/workflows/image-scan.yml` builds both images on every pull request, on `main` and weekly, scans them with Trivy (OS packages and the libraries inside the jar), uploads fixable HIGH/CRITICAL findings to Security → Code scanning and fails the build on any fixable CRITICAL.
+- Branch protection on `main` (a repository setting: require pull requests and the CI, CodeQL and image-scan checks).
 - ~~Structured JSON logs with request ids~~ — done: see §13 Logs and request ids.
 - ~~Alerts~~ — done: see §13 Alerts.
 

@@ -261,7 +261,7 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 - Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
 - Containers run as a non-root user with a read-only filesystem, no Linux capabilities and a memory limit.
 - `/orders` endpoints only ever show the caller's own orders. The test-only reset endpoint does not exist unless `RESET_ENABLED=true`.
-- Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL and Dependabot.
+- Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL, Dependabot, and a Trivy scan of both container images on every pull request.
 
 Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a vulnerability: [SECURITY.md](SECURITY.md).
 
