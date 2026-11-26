@@ -19,7 +19,6 @@ x-app-hardening: &app-hardening
 
 x-sale-service: &sale-service
   <<: *app-hardening
-  build: ./sale-service
   image: stockrush/sale-service:local
   environment:
     PORT: 8080
@@ -174,11 +173,15 @@ services:
       retries: 30
       start_period: 30s
 
+  # Both instances run the same image. Only sale-1 builds it: two services building one image tag in
+  # parallel fails on newer Docker ("image ... already exists"). sale-2 never pulls it from a registry.
   sale-1:
     <<: *sale-service
+    build: ./sale-service
 
   sale-2:
     <<: *sale-service
+    pull_policy: never
 
   order-service:
     <<: *app-hardening
