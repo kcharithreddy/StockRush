@@ -99,7 +99,7 @@ Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 | http://localhost:9090 | Prometheus |
 | http://localhost:8180 | Keycloak (admin console: `admin` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`) |
 
-If you ran an older version of this repo, recreate the database once (`docker compose down -v`): user ids changed from numbers to Keycloak UUIDs.
+The database schema comes from Flyway migrations in `infra/db/migration`, applied automatically by the one-shot `db-migrate` container on `docker compose up`; new migrations apply to an existing database without losing data. If you ran a version of this repo from before migrations existed, recreate the database once (`docker compose down -v`).
 
 ### Run the load test
 
@@ -254,7 +254,7 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 - **Identity:** users authenticate with Keycloak. Every protected request carries a short-lived access token whose signature, issuer, audience and expiry are checked; the user id is the token's subject. Buying and orders need the `buyer` role, `/admin/**` the `admin` role. Forged, tampered, expired or foreign tokens get 401.
 - Only Nginx is published beyond `127.0.0.1`; it routes `/sales/*` and `/orders/*` and nothing else.
 - Every password comes from a git-ignored `.env`; services refuse to start without them.
-- Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema.
+- Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema. Schema changes run as a separate owner role in a one-shot migration container, never in the services.
 - Containers run as a non-root user with a read-only filesystem, no Linux capabilities and a memory limit.
 - `/orders` endpoints only ever show the caller's own orders. The test-only reset endpoint does not exist unless `RESET_ENABLED=true`.
 - Input validation, atomic rate limiting, no stack traces in responses, Maven wrapper pinned by checksum, CodeQL and Dependabot.
@@ -267,6 +267,5 @@ Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a v
 - **Bots.** One account per purchase is only as strong as account creation. Next: a virtual waiting room / queue token before the sale opens, CAPTCHA on suspicious traffic.
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
 - **Poison messages are skipped, not parked.** Next: a dead-letter topic.
-- **Schema by init script.** Next: Flyway migrations.
 - **TLS** at Nginx and between services; Kafka SASL; per-service Redis ACL users.
 - **Alerts** on `redis_high`, consumer lag and 5xx rate; structured JSON logs with request ids.

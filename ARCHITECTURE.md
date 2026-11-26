@@ -83,8 +83,8 @@ flash-sale-system/
 ├── .env.example             # copy to .env (git-ignored); all passwords live there
 ├── .github/                 # CI, CodeQL, Dependabot
 ├── infra/
-│   ├── schema.sql
-│   ├── db-init/02-app-user.sh   # least-privilege DB role
+│   ├── db/migration/          # Flyway migrations V1__…, V2__… (the schema's single source of truth)
+│   ├── db-init/02-app-user.sh   # roles: flashsale_migrator (schema owner) and DB_USER (services)
 │   ├── nginx.conf
 │   ├── nginx-ratelimit.conf     # per-IP limit, included by nginx.conf
 │   ├── prometheus.yml
@@ -101,7 +101,9 @@ flash-sale-system/
 └── docs/                    # load test results, Grafana screenshots
 ```
 
-## 5. Data model (infra/schema.sql — mounted into Postgres init)
+## 5. Data model (infra/db/migration — applied by Flyway)
+
+The schema lives in versioned Flyway migrations: `V1__create_shop_schema.sql` (below), `V2__seed_demo_sale.sql` (the demo sale), `V3__index_orders_by_sale_and_status.sql`. They are never edited once merged; every change is a new `V<n>__description.sql`. The schema as of V1:
 
 ```sql
 CREATE TABLE products (
@@ -138,7 +140,16 @@ VALUES (1, 100, 4999900, now(), now() + interval '30 days');
 
 Money is always integer paise. Never floats.
 
-The tables are owned by the `postgres` superuser, which only initialises the database. The services connect as `DB_USER` (`infra/db-init/02-app-user.sh`): `SELECT` on `products` and `flash_sales`, `SELECT/INSERT/UPDATE/DELETE` on `orders`, no DDL, not a superuser.
+**Who can do what.** `postgres` (superuser) only creates the two roles and hands the `public` schema to `flashsale_migrator` (`infra/db-init/02-app-user.sh`). `flashsale_migrator` owns every table and is used only by the one-shot `db-migrate` container. The services connect as `DB_USER`, which gets exactly the grants each migration gives it (`${app_user}` placeholder): `SELECT` on `products` and `flash_sales`, `SELECT/INSERT/UPDATE/DELETE` on `orders`. It cannot create, alter or drop anything.
+
+**How migrations run.** On `docker compose up`, `db-migrate` (image `flyway/flyway:11.14.1`) applies any pending migrations as `flashsale_migrator` and exits; order-service waits for it to succeed (`service_completed_successfully`). order-service does not contain Flyway at all (it is a test-only dependency), and still validates the result at startup (`ddl-auto: validate`), so a schema that does not match the entities stops it from starting. Tests apply the same files through Flyway against PostgreSQL 16 in Testcontainers.
+
+**Rules for new migrations.**
+
+- Never edit a merged migration; add the next version. Flyway checksums catch edits.
+- Grant the app role what a new table needs, in the same migration (`GRANT … TO "${app_user}"`).
+- Indexes on live tables use `CREATE INDEX CONCURRENTLY` with `-- flyway:executeInTransaction=false` at the top, and without `IF NOT EXISTS` (an interrupted build leaves an INVALID index that `IF NOT EXISTS` would silently accept).
+- Flyway runs with `postgresql.transactional.lock=false`. With the default transactional lock, `CREATE INDEX CONCURRENTLY` waits forever on Flyway's own lock transaction — this happened while adding V3, and also left the history claiming success with an invalid index, which had to be cleaned up by hand.
 
 ## 6. Redis keys
 
@@ -340,7 +351,7 @@ Grafana panels (document the PromQL in README):
 
 ### Phase 1 — Infrastructure and skeletons
 
-- `docker-compose.yml` with postgres, redis, kafka; `infra/schema.sql`.
+- `docker-compose.yml` with postgres, redis, kafka; the schema (originally `infra/schema.sql`, now Flyway migrations in `infra/db/migration`).
 - Generate both Spring Boot apps (Web, Data Redis, Kafka, Actuator, Validation; order-service also JPA + PostgreSQL driver).
 - application.yml for both per §12.
 - order-service: `FlashSale` and `PurchaseOrder` entities + repositories, admin warm-up and reset endpoints.
@@ -398,7 +409,9 @@ k6 run -e LOADTEST_JWT_SECRET loadtest/flash-sale.js   # after `set -a; . ./.env
 docker compose up -d                      # back to normal: per-IP limit on, load-test issuer off
 docker compose exec postgres psql -U postgres -d flashsale
 docker compose exec redis redis-cli     # authenticates via REDISCLI_AUTH
-docker compose down -v                    # wipe data (needed after changing DB passwords)
+docker compose down -v                    # wipe data (only needed after changing DB passwords)
+docker compose up db-migrate              # apply new migrations to the running database
+docker compose run --rm db-migrate info   # show migration history
 ```
 
 ## 17. Security
@@ -409,7 +422,7 @@ docker compose down -v                    # wipe data (needed after changing DB 
 | :---- | :---- |
 | Infrastructure reachable from the network | Every compose port bound to `127.0.0.1` |
 | Anyone editing stock or flushing Redis | `requirepass` from `.env` |
-| App able to drop tables / read everything | Least-privilege `DB_USER`; superuser only initialises |
+| App able to drop tables / read everything | Least-privilege `DB_USER`; schema owned by `flashsale_migrator`, used only by the one-shot `db-migrate` container; superuser only creates roles |
 | Secrets in git | `.env` git-ignored; no defaults for secrets; `.env.example` only |
 | Metrics and health leaking internals | Actuator on an internal management port |
 | Accidental data wipe | `reset` endpoint absent unless `RESET_ENABLED=true` |
@@ -444,13 +457,14 @@ docker compose down -v                    # wipe data (needed after changing DB 
 - Keycloak runs `start-dev` (plain HTTP) for local use. `KC_HOSTNAME=http://localhost:8180` fixes the issuer, so tokens fetched on the host validate inside Docker, where the services read keys from `keycloak:8080`.
 - **Load-test issuer.** k6 cannot log in 20 000 Keycloak users. `docker-compose.loadtest.yml` sets `LOADTEST_JWT_SECRET` on the services, which then also accept HS256 tokens with `iss = stockrush-loadtest`, signed with that secret (same audience, expiry and subject rules). Without the secret — the normal stack — such tokens are rejected (verified: 401). Services log a WARN at startup whenever it is on.
 - Rate limits apply per authenticated account; Nginx keeps the per-IP limit.
-- Schema change: `orders.user_id` is a UUID. An existing local database must be recreated (`docker compose down -v`); Flyway (Step C) will handle such changes as migrations.
+- Schema change: `orders.user_id` is a UUID. (Before Flyway, this needed a database rebuild; such changes are now migrations.)
 
 ### Step C — after Phase 4
 
 - Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
 - TLS at Nginx; Kafka SASL; Redis ACL users per service.
-- Dead-letter topic for the consumer; Flyway migrations.
+- Dead-letter topic for the consumer.
+- ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
 - Image scanning in CI; branch protection on `main`.
 - Structured JSON logs with request ids; alerts on `flashsale_reconcile_mismatch_total`.
