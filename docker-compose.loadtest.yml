@@ -1,4 +1,5 @@
 # Load-test override. Do not use for anything else.
+# Needs Docker Compose v2.24.4 or newer (the !override tag below); check with `docker compose version`.
 #   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d
 # Back to normal:
 #   docker compose up -d
