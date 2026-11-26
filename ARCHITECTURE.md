@@ -438,6 +438,7 @@ docker compose down -v                    # wipe data (needed after changing DB 
 | Buyers using operator endpoints | `/admin/**` needs the `admin` realm role; operators cannot buy |
 | Password guessing | Keycloak brute-force protection (lockout after 5 failures), 12-character minimum |
 | Shared database blast radius | Keycloak has its own database and role; it cannot connect to `flashsale` |
+| Cross-site request forgery | CSRF protection is on for every state-changing request that carries cookies (what a forged browser request carries). The API itself uses no cookies or sessions — only `Authorization: Bearer`, which browsers never add automatically — so token-less API calls get a clean 401/403 rather than a CSRF error |
 
 - Realm `stockrush` is imported from `infra/keycloak/stockrush-realm.json`. Clients: `stockrush-web` (browser, authorization code + PKCE) and `stockrush-cli` (password grant, **local development only** — remove in production). Demo users `buyer1`, `buyer2` (`buyer`) and `shopadmin` (`admin`) get `DEMO_USER_PASSWORD` from `.env` at import. `scripts/token.sh <user>` prints a token.
 - Keycloak runs `start-dev` (plain HTTP) for local use. `KC_HOSTNAME=http://localhost:8180` fixes the issuer, so tokens fetched on the host validate inside Docker, where the services read keys from `keycloak:8080`.

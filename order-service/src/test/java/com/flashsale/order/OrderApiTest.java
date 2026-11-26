@@ -3,14 +3,13 @@ package com.flashsale.order;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import com.flashsale.order.security.TestTokens;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -26,7 +25,7 @@ class OrderApiTest extends IntegrationTest {
     MockMvc mvc;
 
     private static RequestPostProcessor as(UUID user, String role) {
-        return jwt().jwt(j -> j.subject(user.toString())).authorities(new SimpleGrantedAuthority("ROLE_" + role));
+        return TestTokens.bearer(user, role);
     }
 
     private static RequestPostProcessor buyer(UUID user) {
@@ -106,5 +105,18 @@ class OrderApiTest extends IntegrationTest {
     @Test
     void everythingElseIsDenied() throws Exception {
         mvc.perform(get("/anything").with(as(ALICE, "admin"))).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void cookieCarryingPayWithoutCsrfTokenIsRejected() throws Exception {
+        UUID token = insertOrder(1, ALICE, "PENDING_PAYMENT", 0);
+
+        mvc.perform(post("/orders/" + token + "/pay")
+                        .cookie(new jakarta.servlet.http.Cookie("SESSION", "stolen"))
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .user("alice").roles("buyer")))
+                .andExpect(status().isForbidden());
+
+        assertThat(statusOf(token)).isEqualTo("PENDING_PAYMENT");
     }
 }

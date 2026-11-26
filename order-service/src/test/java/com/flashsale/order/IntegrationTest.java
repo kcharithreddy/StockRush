@@ -23,7 +23,8 @@ import java.util.UUID;
         "spring.kafka.admin.auto-create=false",
         "flashsale.jobs.enabled=false",
         "flashsale.admin.reset-enabled=true",
-        "spring.data.redis.password="
+        "spring.data.redis.password=",
+        com.flashsale.order.security.TestTokens.SECRET_PROPERTY
 })
 public abstract class IntegrationTest {
 

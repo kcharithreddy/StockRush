@@ -3,6 +3,7 @@ package com.flashsale.sale.web;
 import com.flashsale.sale.buy.BuyResult;
 import com.flashsale.sale.buy.BuyService;
 import com.flashsale.sale.security.SecurityConfig;
+import com.flashsale.sale.security.TestTokens;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,7 +12,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
@@ -25,7 +26,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -35,6 +35,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /** HTTP-level behaviour: authentication, roles, validation, Redis outages and error bodies. */
 @WebMvcTest(controllers = {SaleController.class, StockController.class})
 @Import(SecurityConfig.class)
+@TestPropertySource(properties = TestTokens.SECRET_PROPERTY)
 class SaleWebLayerTest {
 
     private static final UUID USER = UUID.randomUUID();
@@ -61,7 +62,7 @@ class SaleWebLayerTest {
     }
 
     private static RequestPostProcessor buyer() {
-        return jwt().jwt(j -> j.subject(USER.toString())).authorities(new SimpleGrantedAuthority("ROLE_buyer"));
+        return TestTokens.bearer(USER, "buyer");
     }
 
     @Test
@@ -83,8 +84,7 @@ class SaleWebLayerTest {
 
     @Test
     void buyWithoutBuyerRoleIs403() throws Exception {
-        mvc.perform(post("/sales/1/buy")
-                        .with(jwt().jwt(j -> j.subject(USER.toString())).authorities(new SimpleGrantedAuthority("ROLE_admin"))))
+        mvc.perform(post("/sales/1/buy").with(TestTokens.bearer(USER, "admin")))
                 .andExpect(status().isForbidden());
         verifyNoInteractions(buyService);
     }
@@ -111,5 +111,38 @@ class SaleWebLayerTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(header().string("Retry-After", "1"))
                 .andExpect(jsonPath("$.status").value("TRY_AGAIN"));
+    }
+
+    @Test
+    void forgedOrExpiredTokensAre401() throws Exception {
+        String valid = TestTokens.token(USER, "buyer");
+        String[] parts = valid.split("\\.");
+        String tampered = parts[0] + "." + parts[1].substring(0, parts[1].length() - 2) + "AA." + parts[2];
+
+        mvc.perform(post("/sales/1/buy").header("Authorization", "Bearer " + tampered))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/sales/1/buy").header("Authorization", "Bearer not-a-token"))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(buyService);
+    }
+
+    @Test
+    void cookieCarryingPostWithoutCsrfTokenIsRejected() throws Exception {
+        // What a forged cross-site request looks like: the browser attaches cookies, never a bearer header.
+        // Even with an authenticated principal it must not reach the service.
+        mvc.perform(post("/sales/1/buy")
+                        .cookie(new jakarta.servlet.http.Cookie("SESSION", "stolen"))
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .user("someone").roles("buyer")))
+                .andExpect(status().isForbidden());
+        verifyNoInteractions(buyService);
+    }
+
+    @Test
+    void bearerPostWorksEvenWithCookiesPresent() throws Exception {
+        when(buyService.buy(anyLong(), any())).thenReturn(BuyResult.success("tok"));
+
+        mvc.perform(post("/sales/1/buy").with(buyer()).cookie(new jakarta.servlet.http.Cookie("other", "x")))
+                .andExpect(status().isAccepted());
     }
 }
