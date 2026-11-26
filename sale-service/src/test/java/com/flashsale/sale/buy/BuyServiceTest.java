@@ -1,6 +1,6 @@
 package com.flashsale.sale.buy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,7 +46,7 @@ class BuyServiceTest {
         when(redis.opsForValue()).thenReturn(values);
         when(redis.opsForSet()).thenReturn(sets);
         meters = new SimpleMeterRegistry();
-        service = new BuyService(redis, script, kafka, new ObjectMapper(), meters);
+        service = new BuyService(redis, script, kafka, JsonMapper.builder().build(), meters);
     }
 
     private void luaReturns(long result) {

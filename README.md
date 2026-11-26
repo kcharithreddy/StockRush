@@ -63,7 +63,7 @@ flowchart LR
 | **PostgreSQL** | Source of truth for orders. |
 | **Prometheus + Grafana** | Metrics and the provisioned dashboard above. |
 
-Tech: Java 17, Spring Boot 3.5, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
+Tech: Java 17, Spring Boot 4.2, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
 
 ## Run it
 

@@ -16,7 +16,7 @@ A flash-sale backend: thousands of users try to buy a small, fixed stock (e.g. 1
 
 | Concern | Choice |
 | :---- | :---- |
-| Language / framework | Java 17, Spring Boot 3.x, Maven (use the Maven wrapper `./mvnw`; the wrapper needs `unzip`, since its download is pinned to the zip's checksum). Images are built from source in Docker (`maven:3.9.11-eclipse-temurin-17` build stage, JRE-only runtime stage), so running the stack needs no local JDK |
+| Language / framework | Java 17, Spring Boot 4.x (Spring Framework 7, Jackson 3), Maven (use the Maven wrapper `./mvnw`; the wrapper needs `unzip`, since its download is pinned to the zip's checksum). Images are built from source in Docker (`maven:3.9.11-eclipse-temurin-17` build stage, JRE-only runtime stage), so running the stack needs no local JDK |
 | Hot state / atomic stock | Redis 7 with AOF (`--appendonly yes`), Lua scripts |
 | Async order pipeline | Apache Kafka 3.8 (KRaft mode, no ZooKeeper), image `apache/kafka:3.8.0` |
 | Database | PostgreSQL 16 |
@@ -142,7 +142,7 @@ Money is always integer paise. Never floats.
 
 **Who can do what.** `postgres` (superuser) only creates the two roles and hands the `public` schema to `flashsale_migrator` (`infra/db-init/02-app-user.sh`). `flashsale_migrator` owns every table and is used only by the one-shot `db-migrate` container. The services connect as `DB_USER`, which gets exactly the grants each migration gives it (`${app_user}` placeholder): `SELECT` on `products` and `flash_sales`, `SELECT/INSERT/UPDATE/DELETE` on `orders`. It cannot create, alter or drop anything.
 
-**How migrations run.** On `docker compose up`, `db-migrate` (image `flyway/flyway:11.14.1`) applies any pending migrations as `flashsale_migrator` and exits; order-service waits for it to succeed (`service_completed_successfully`). order-service does not contain Flyway at all (it is a test-only dependency), and still validates the result at startup (`ddl-auto: validate`), so a schema that does not match the entities stops it from starting. Tests apply the same files through Flyway against PostgreSQL 16 in Testcontainers.
+**How migrations run.** On `docker compose up`, `db-migrate` (image `flyway/flyway:12.11.0`) applies any pending migrations as `flashsale_migrator` and exits; order-service waits for it to succeed (`service_completed_successfully`). order-service does not contain Flyway at all (it is a test-only dependency), and still validates the result at startup (`ddl-auto: validate`), so a schema that does not match the entities stops it from starting. Tests apply the same files through Flyway against PostgreSQL 16 in Testcontainers.
 
 **Rules for new migrations.**
 
@@ -469,7 +469,7 @@ docker compose run --rm db-migrate info   # show migration history
 | Stack traces in responses | `server.error.include-message/stacktrace: never` |
 | Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
 | Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot, Trivy image scan (fails on fixable CRITICAL) |
-| Known CVEs in bundled libraries | Tomcat 10.1.59 and Netty 4.1.137 pinned in both poms over Spring Boot's managed versions (fixable CRITICALs found by Trivy). `.trivyignore.yaml` lists findings that do not apply, each with its reason and an expiry date after which the gate fails again: today two spring-webmvc 6.2.19 CVEs (XsltView rendering, SSE view fragments — neither service renders views); their only open-source fix is Spring Framework 7 / Spring Boot 4 |
+| Known CVEs in bundled libraries | Stay on a supported Spring Boot line (4.x) and take its managed Tomcat, Netty and Spring versions; override a version in the pom only when Trivy finds a fixable CRITICAL that Spring Boot has not shipped yet, and remove the override at the next Boot bump. `.trivyignore.yaml` lists findings that do not apply, each with its reason and an expiry date after which the gate fails again (empty today) |
 | Personal data in logs | Logs never contain order tokens, user ids or event payloads (CodeQL `java/sensitive-log`); the request id links log lines instead, and dead-lettered records keep the full payload on the DLT for admins |
 | Stray topics | Kafka `auto.create.topics.enable=false` |
 | Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |

@@ -1,15 +1,10 @@
 # Vulnerabilities Trivy reports that do not apply to StockRush, each with the reason and an expiry.
 # After `expired_at` the finding counts again and the image-scan gate fails until someone re-checks it.
-vulnerabilities:
-  - id: CVE-2026-47884
-    statement: >-
-      spring-webmvc 6.2.19: SSRF/RCE through XsltView when a "/**" mapping renders a view without an explicit
-      view name. Both services are JSON-only REST APIs (@RestController): no views, no XsltView, no template
-      engine. The OSS fix exists only in Spring Framework 7.0.9 (Spring Boot 4); 6.2.20 is commercial support only.
-      Re-check, or upgrade to Spring Boot 4, before expiry.
-    expired_at: 2027-02-28
-  - id: CVE-2026-47890
-    statement: >-
-      spring-webmvc 6.2.19: Server-Sent Events stream corruption when rendering view fragments. Neither service
-      uses SSE or views. OSS fix only in Spring Framework 7.0.9. Re-check, or upgrade to Spring Boot 4, before expiry.
-    expired_at: 2027-02-28
+# Entry format:
+#   - id: CVE-YYYY-NNNNN
+#     statement: why it does not apply here
+#     expired_at: YYYY-MM-DD
+#
+# Empty since the Spring Boot 4 upgrade: the two spring-webmvc 6.2.19 CVEs listed here before
+# (CVE-2026-47884, CVE-2026-47890) are fixed in Spring Framework 7.
+vulnerabilities: []

@@ -67,7 +67,7 @@ services:
   # One-shot: applies infra/db/migration with Flyway as the schema owner, then exits.
   # order-service starts only after it succeeds, and never holds credentials that can change the schema.
   db-migrate:
-    image: flyway/flyway:11.14.1
+    image: flyway/flyway:12.11.0
     command: ["migrate"]
     environment:
       FLYWAY_URL: jdbc:postgresql://postgres:5432/flashsale
