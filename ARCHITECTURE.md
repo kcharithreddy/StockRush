@@ -189,7 +189,8 @@ This script is the ONLY place stock is decremented. Never implement "read stock 
 
 ## 8. Kafka
 
-- Topic `order-created`: 3 partitions, replication 1, created via a `NewTopic` bean in sale-service.
+- Topic `order-created`: 3 partitions, replication 1, created via a `NewTopic` bean in sale-service (and the same definition in order-service).
+- Topic `order-created.DLT`: 3 partitions, replication 1, created by order-service. A dead-lettered record keeps its partition and carries the error in Spring Kafka's `kafka_dlt-*` headers.
 - Message key: `userId` as string. Value: JSON string.
 - Event: `record OrderCreatedEvent(String orderToken, long saleId, String userId)` — `userId` is the buyer's Keycloak subject (UUID).
 - Producer: `acks=all`, String serializers. The send is synchronous with a 2 s timeout (`.get(2, SECONDS)`).
@@ -262,7 +263,16 @@ ON CONFLICT DO NOTHING
 The listener runs 3 consumers (one per partition). Errors are handled by `KafkaConfig.kafkaErrorHandler`:
 
 - Transient failures (database down) are retried with exponential backoff — 0.5 s doubling to 30 s, for up to 5 minutes.
-- Records that can never succeed (malformed JSON, bad ids or token, unknown sale) are logged and skipped at once, so one bad record cannot block a partition. Step C replaces the skip with a dead-letter topic.
+- Records that can never succeed (malformed JSON, bad ids or token, unknown sale) are not retried.
+- Either way, a record that is given up on is published to **`order-created.DLT`** with the error, logged at ERROR and counted in `flashsale_orders_dead_lettered_total{reason}`; the partition moves on, so one bad record never blocks the others.
+
+**What a dead letter means.** The buyer got `202` and holds a unit in Redis, but has no order row, so reconciliation reports `redis_low` until it is dealt with.
+
+**Operating it** (both need the `admin` role):
+
+- `GET /admin/dead-letters?limit=100` — records not yet replayed: partition, offset, key, payload, error, original topic and offset.
+- `POST /admin/dead-letters/replay` → `{"replayed": n}` — fix the cause first (deploy the fix, create the missing sale, bring the database back), then replay. It re-publishes each pending record's payload and key to `order-created` and remembers its position (consumer group `order-service-dlt-replay`), so each record is replayed once. The consumer is idempotent, so replaying something that was in fact processed changes nothing; a record that still fails simply returns to the DLT.
+- A record that can never be fixed (garbage payload) comes back on every replay. Discard it by moving the replay group past it: `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group order-service-dlt-replay --topic order-created.DLT --reset-offsets --to-latest --execute`, then release the buyer's unit by hand if needed.
 
 ### Payment timeout (order-service `PaymentTimeoutWorker`)
 
@@ -328,6 +338,7 @@ Both services: Actuator with `health,prometheus` exposed on the separate `MANAGE
 - `flashsale_buy_total{result="SUCCESS|SOLD_OUT|ALREADY_BOUGHT|NOT_ACTIVE|TRY_AGAIN"}` (sale-service)
 - `flashsale_orders_placed_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service). The spec originally said `flashsale_orders_created_total`, but the Prometheus client strips a trailing `_created` (an OpenMetrics reserved suffix), so that name cannot be exported.
 - `flashsale_reconcile_mismatch_total{direction}` (order-service)
+- `flashsale_orders_dead_lettered_total{reason}` (order-service): records parked on `order-created.DLT`, by root-cause exception
 
 Prometheus (`infra/prometheus.yml`) scrapes `sale-1:9080`, `sale-2:9080` and `order-service:9091` every 5 s. Grafana provisions the datasource and the **StockRush — Flash Sale** dashboard from `infra/grafana/`. Its stat panels count exactly within the selected time range (`max_over_time − min_over_time`), not with `increase()`, whose extrapolation would show e.g. 313 for 300 orders.
 
@@ -463,7 +474,7 @@ docker compose run --rm db-migrate info   # show migration history
 
 - Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
 - TLS at Nginx; Kafka SASL; Redis ACL users per service.
-- Dead-letter topic for the consumer.
+- ~~Dead-letter topic for the consumer~~ — done: see §10, Order creation.
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
 - Image scanning in CI; branch protection on `main`.
