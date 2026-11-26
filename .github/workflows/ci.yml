@@ -61,14 +61,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Use exactly the images docker-compose.yml runs, so a Dependabot bump is tested before it merges.
+      - name: Read image versions from docker-compose.yml
+        run: |
+          echo "PROMETHEUS=$(grep -oE 'prom/prometheus:[^ "]+' docker-compose.yml | head -1)" >> "$GITHUB_ENV"
+          echo "ALERTMANAGER=$(grep -oE 'prom/alertmanager:[^ "]+' docker-compose.yml | head -1)" >> "$GITHUB_ENV"
       - name: Check and unit-test Prometheus rules
         run: |
-          docker run --rm -v "$PWD/infra/alerting:/rules:ro" -w /rules --entrypoint /bin/promtool \
-            prom/prometheus:v3.5.0 check rules alerts.yml
-          docker run --rm -v "$PWD/infra/alerting:/rules:ro" -w /rules --entrypoint /bin/promtool \
-            prom/prometheus:v3.5.0 test rules alerts.test.yml
+          docker run --rm -v "$PWD/infra/alerting:/rules:ro" -w /rules --entrypoint /bin/promtool "$PROMETHEUS" check rules alerts.yml
+          docker run --rm -v "$PWD/infra/alerting:/rules:ro" -w /rules --entrypoint /bin/promtool "$PROMETHEUS" test rules alerts.test.yml
       - name: Check Alertmanager config
         run: |
-          docker run --rm -v "$PWD/infra/alerting:/c:ro" --entrypoint /bin/amtool \
-            prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
+          docker run --rm -v "$PWD/infra/alerting:/c:ro" --entrypoint /bin/amtool "$ALERTMANAGER" check-config /c/alertmanager.yml
 
+  nginx:
+    name: Check Nginx config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: nginx -t with the compose image and a throwaway certificate
+        run: |
+          scripts/dev-cert.sh
+          NGINX=$(grep -oE 'nginx:[0-9][^ "]*' docker-compose.yml | head -1)
+          # The upstreams resolve through Docker DNS, so check on a network where those names exist.
+          docker network create stockrush-ci
+          for name in sale-1 sale-2 order-service; do
+            docker run -d --rm --network stockrush-ci --name "$name" busybox sleep 120
+          done
+          docker run --rm --network stockrush-ci \
+            -v "$PWD/infra/nginx.conf:/etc/nginx/nginx.conf:ro" \
+            -v "$PWD/infra/nginx-ratelimit.conf:/etc/nginx/ratelimit.conf:ro" \
+            -v "$PWD/infra/tls:/etc/nginx/tls:ro" \
+            "$NGINX" nginx -t
