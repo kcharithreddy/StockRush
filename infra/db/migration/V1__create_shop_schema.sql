@@ -1,3 +1,6 @@
+-- Shop schema (ARCHITECTURE.md §5). Applied by Flyway as flashsale_migrator, which owns these objects.
+-- ${app_user} is the services' least-privilege role; every migration grants it exactly what it needs.
+
 CREATE TABLE products (
   id          BIGSERIAL PRIMARY KEY,
   name        TEXT   NOT NULL,
@@ -25,6 +28,6 @@ CREATE TABLE orders (
 );
 CREATE INDEX idx_orders_status_created ON orders(status, created_at);
 
-INSERT INTO products (name, price_paise) VALUES ('Phone X 128GB', 7999900);
-INSERT INTO flash_sales (product_id, total_stock, sale_price_paise, starts_at, ends_at)
-VALUES (1, 100, 4999900, now(), now() + interval '30 days');
+GRANT SELECT ON products, flash_sales TO "${app_user}";
+GRANT SELECT, INSERT, UPDATE, DELETE ON orders TO "${app_user}";
+GRANT USAGE, SELECT ON SEQUENCE orders_id_seq TO "${app_user}";

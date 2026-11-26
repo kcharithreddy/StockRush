@@ -47,14 +47,14 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: flashsale
-      # Least-privilege role the services connect as (created by infra/db-init/02-app-user.sh).
+      # Roles: flashsale_migrator owns the schema, DB_USER is what the services use (infra/db-init/02-app-user.sh).
       APP_DB_USER: ${DB_USER:?set DB_USER in .env}
       APP_DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD in .env}
+      MIGRATOR_DB_PASSWORD: ${DB_MIGRATOR_PASSWORD:?set DB_MIGRATOR_PASSWORD in .env}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
-      - ./infra/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./infra/db-init/02-app-user.sh:/docker-entrypoint-initdb.d/02-app-user.sh:ro
       - ./infra/db-init/03-keycloak-db.sh:/docker-entrypoint-initdb.d/03-keycloak-db.sh:ro
       - pgdata:/var/lib/postgresql/data
@@ -63,6 +63,31 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # One-shot: applies infra/db/migration with Flyway as the schema owner, then exits.
+  # order-service starts only after it succeeds, and never holds credentials that can change the schema.
+  db-migrate:
+    image: flyway/flyway:11.14.1
+    command: ["migrate"]
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/flashsale
+      FLYWAY_USER: flashsale_migrator
+      FLYWAY_PASSWORD: ${DB_MIGRATOR_PASSWORD:?set DB_MIGRATOR_PASSWORD in .env}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_PLACEHOLDERS_APP_USER: ${DB_USER:?set DB_USER in .env}
+      FLYWAY_VALIDATE_MIGRATION_NAMING: "true"
+      FLYWAY_CONNECT_RETRIES: "10"
+      # Session-level migration lock. The default (a lock held in an open transaction) makes
+      # CREATE INDEX CONCURRENTLY wait on Flyway itself forever.
+      FLYWAY_POSTGRESQL_TRANSACTIONAL_LOCK: "false"
+    volumes:
+      - ./infra/db/migration:/flyway/sql:ro
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   redis:
     image: redis:7.4.12-alpine
@@ -166,8 +191,8 @@ services:
       # Admin endpoints (Keycloak admin role required) for operators on this machine only.
       - "127.0.0.1:8090:8090"
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       kafka:
