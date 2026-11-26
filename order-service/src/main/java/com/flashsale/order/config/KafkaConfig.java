@@ -60,8 +60,9 @@ public class KafkaConfig {
         ConsumerRecordRecoverer recoverer = (record, error) -> {
             Throwable cause = rootCause(error);
             String reason = reason(error);
-            log.error("Dead-lettering {}-{}@{} (key {}) [{}]: {}: {}", record.topic(), record.partition(),
-                    record.offset(), record.key(), reason, cause.getClass().getName(), cause.getMessage());
+            // No key or payload in the log: they identify a buyer. The record itself is on the DLT for operators.
+            log.error("Dead-lettering {}-{}@{} [{}]: {}", record.topic(), record.partition(),
+                    record.offset(), reason, cause.getClass().getName());
             toDeadLetterTopic.accept(record, error);
             meters.counter(DEAD_LETTER_METRIC, "reason", reason).increment();
         };

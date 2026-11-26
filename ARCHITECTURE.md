@@ -471,6 +471,8 @@ docker compose run --rm db-migrate info   # show migration history
 | Stack traces in responses | `server.error.include-message/stacktrace: never` |
 | Tampered build tool | Maven wrapper pinned with `distributionSha256Sum` (verified against Apache's SHA-512) |
 | Vulnerable dependencies / code | GitHub Actions CI, CodeQL (`security-extended`), Dependabot, Trivy image scan (fails on fixable CRITICAL) |
+| Known CVEs in bundled libraries | Tomcat 10.1.59 and Netty 4.1.137 pinned in both poms over Spring Boot's managed versions (fixable CRITICALs found by Trivy). `.trivyignore.yaml` lists findings that do not apply, each with its reason and an expiry date after which the gate fails again: today two spring-webmvc 6.2.19 CVEs (XsltView rendering, SSE view fragments — neither service renders views); their only open-source fix is Spring Framework 7 / Spring Boot 4 |
+| Personal data in logs | Logs never contain order tokens, user ids or event payloads (CodeQL `java/sensitive-log`); the request id links log lines instead, and dead-lettered records keep the full payload on the DLT for admins |
 | Stray topics | Kafka `auto.create.topics.enable=false` |
 | Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |
 | Internal endpoints reachable from outside | Nginx routes only `/sales/*` and `/orders/*`; sale containers are not published; order-service on `127.0.0.1` only |

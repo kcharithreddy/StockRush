@@ -38,10 +38,9 @@ public class OrderConsumer {
 
         if (orders.insertPending(token, event.saleId(), userId)) {
             metrics.created();
-            log.info("Order {} created in sale {}", token, event.saleId());
+            log.info("Order created in sale {}", event.saleId());
         } else {
-            log.info("Duplicate order-created event ignored: token={} sale={} user={}",
-                    token, event.saleId(), event.userId());
+            log.info("Duplicate order-created event ignored for sale {}", event.saleId());
         }
     }
 
@@ -56,7 +55,7 @@ public class OrderConsumer {
             throw new InvalidEventException("Malformed order-created payload", e);
         }
         if (event.saleId() <= 0) {
-            throw new InvalidEventException("Invalid ids in " + event);
+            throw new InvalidEventException("Invalid sale id");
         }
         return event;
     }
@@ -65,7 +64,7 @@ public class OrderConsumer {
         try {
             return UUID.fromString(value);
         } catch (IllegalArgumentException | NullPointerException e) {
-            throw new InvalidEventException("Invalid " + what + ": " + value, e);
+            throw new InvalidEventException("Invalid " + what, e);
         }
     }
 }
