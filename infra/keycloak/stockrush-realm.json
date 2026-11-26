@@ -1,0 +1,155 @@
+{
+  "realm": "stockrush",
+  "enabled": true,
+  "displayName": "StockRush",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "permanentLockout": false,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "passwordPolicy": "length(12)",
+  "roles": {
+    "realm": [
+      {
+        "name": "buyer",
+        "description": "Can buy in flash sales and pay for own orders"
+      },
+      {
+        "name": "admin",
+        "description": "Can warm up and reset sales"
+      }
+    ]
+  },
+  "defaultRole": {
+    "name": "default-roles-stockrush",
+    "composite": true,
+    "composites": {
+      "realm": [
+        "buyer",
+        "offline_access",
+        "uma_authorization"
+      ]
+    }
+  },
+  "clients": [
+    {
+      "clientId": "stockrush-web",
+      "name": "StockRush web app",
+      "description": "Browser client: authorization code flow with PKCE.",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "stockrush-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "stockrush-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "stockrush-cli",
+      "name": "StockRush CLI (local development only)",
+      "description": "Password grant for curl and scripts on a developer machine. Remove in production.",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "stockrush-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "stockrush-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "buyer1",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Buyer One",
+      "email": "buyer1@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "buyer"
+      ]
+    },
+    {
+      "username": "buyer2",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Buyer Two",
+      "email": "buyer2@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "buyer"
+      ]
+    },
+    {
+      "username": "shopadmin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Demo",
+      "lastName": "Admin",
+      "email": "shopadmin@example.com",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${DEMO_USER_PASSWORD}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "admin"
+      ]
+    }
+  ]
+}

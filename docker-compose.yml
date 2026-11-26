@@ -27,6 +27,7 @@ x-sale-service: &sale-service
     REDIS_HOST: redis
     REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     KAFKA: kafka:29092
+    OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
   depends_on:
     redis:
       condition: service_healthy
@@ -49,11 +50,13 @@ services:
       # Least-privilege role the services connect as (created by infra/db-init/02-app-user.sh).
       APP_DB_USER: ${DB_USER:?set DB_USER in .env}
       APP_DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD in .env}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - ./infra/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./infra/db-init/02-app-user.sh:/docker-entrypoint-initdb.d/02-app-user.sh:ro
+      - ./infra/db-init/03-keycloak-db.sh:/docker-entrypoint-initdb.d/03-keycloak-db.sh:ro
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d flashsale"]
@@ -105,6 +108,40 @@ services:
       retries: 20
       start_period: 15s
 
+  keycloak:
+    image: keycloak/keycloak:26.4.0
+    # start-dev: plain HTTP, for a developer machine only. Production runs `start` behind TLS.
+    command: ["start-dev", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD in .env}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD in .env}
+      # Tokens always carry this issuer, whether fetched from the host or from inside Docker.
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      # Substituted into infra/keycloak/stockrush-realm.json on import.
+      DEMO_USER_PASSWORD: ${DEMO_USER_PASSWORD:?set DEMO_USER_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - ./infra/keycloak/stockrush-realm.json:/opt/keycloak/data/import/stockrush-realm.json:ro
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
   sale-1:
     <<: *sale-service
 
@@ -124,8 +161,9 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
       RESET_ENABLED: ${RESET_ENABLED:-false}
       ORDERS_PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-10}
+      OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
     ports:
-      # Admin endpoints live here and are unauthenticated until Step B: host only.
+      # Admin endpoints (Keycloak admin role required) for operators on this machine only.
       - "127.0.0.1:8090:8090"
     depends_on:
       postgres:
