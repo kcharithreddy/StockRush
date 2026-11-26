@@ -125,8 +125,6 @@ Throughput and latency are limited by the shared 4-core machine (k6 alone genera
 
 ```bash
 cp .env.example .env                                   # once
-(cd sale-service && ./mvnw -DskipTests package)
-(cd order-service && ./mvnw -DskipTests package)
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build
 set -a; . ./.env; set +a                               # LOADTEST_JWT_SECRET for k6
 

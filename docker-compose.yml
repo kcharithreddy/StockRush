@@ -2,8 +2,7 @@ name: stockrush
 
 # Secrets come from .env (copy .env.example, never commit .env).
 # Only Nginx is published on all interfaces; everything else is bound to 127.0.0.1 or not published.
-# Build the jars before `docker compose up --build`:
-#   (cd sale-service && ./mvnw -DskipTests package) && (cd order-service && ./mvnw -DskipTests package)
+# `docker compose up -d --build` compiles the Java services inside Docker; no local Java is needed.
 
 x-app-hardening: &app-hardening
   restart: unless-stopped

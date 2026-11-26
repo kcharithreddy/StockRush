@@ -16,7 +16,7 @@ A flash-sale backend: thousands of users try to buy a small, fixed stock (e.g. 1
 
 | Concern | Choice |
 | :---- | :---- |
-| Language / framework | Java 17, Spring Boot 3.x, Maven (use the Maven wrapper `./mvnw`) |
+| Language / framework | Java 17, Spring Boot 3.x, Maven (use the Maven wrapper `./mvnw`; the wrapper needs `unzip`, since its download is pinned to the zip's checksum). Images are built from source in Docker (`maven:3.9.11-eclipse-temurin-17` build stage, JRE-only runtime stage), so running the stack needs no local JDK |
 | Hot state / atomic stock | Redis 7 with AOF (`--appendonly yes`), Lua scripts |
 | Async order pipeline | Apache Kafka 3.8 (KRaft mode, no ZooKeeper), image `apache/kafka:3.8.0` |
 | Database | PostgreSQL 16 |
@@ -437,8 +437,6 @@ scripts/dev-cert.sh                       # once: local CA + certificate for htt
 TOKEN=$(scripts/token.sh buyer1)          # demo users: buyer1, buyer2, shopadmin (password DEMO_USER_PASSWORD)
 ADMIN=$(scripts/token.sh shopadmin)
 docker compose up -d                      # start everything
-(cd sale-service && ./mvnw -DskipTests package)
-(cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build              # rebuild services after code changes
 curl -X POST localhost:8090/admin/sales/1/reset
 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d   # per-IP limit off, load-test issuer on

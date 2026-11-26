@@ -67,13 +67,11 @@ Tech: Java 17, Spring Boot 3.5, Spring Security (OAuth2 resource server), Keyclo
 
 ## Run it
 
-Requires Docker and Java 17+.
+Requires only Docker (with Compose). The Java services are compiled inside Docker; no local Java or Maven is needed to run the project.
 
 ```bash
 cp .env.example .env              # then change the passwords in .env
 scripts/dev-cert.sh               # local CA + certificate for https://localhost:8443 (git-ignored)
-(cd sale-service && ./mvnw -DskipTests package)
-(cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build
 ```
 
@@ -122,6 +120,7 @@ The run passes only if exactly 100 attempts win and nothing returns an unexpecte
 ### Tests
 
 ```bash
+# Running the tests needs JDK 17 (set JAVA_HOME to it), `unzip`, and Docker for Testcontainers.
 (cd sale-service && ./mvnw verify)     # includes a Testcontainers race: 200 buyers, 10 units, exactly 10 winners
 (cd order-service && ./mvnw verify)    # idempotent consumer, payment, timeouts, reconciliation on real PostgreSQL + Redis
 ```
