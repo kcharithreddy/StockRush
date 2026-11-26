@@ -16,6 +16,7 @@ services:
       - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./loadtest/nginx-no-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
       - ./infra/tls:/etc/nginx/tls:ro
+      - ./web:/usr/share/nginx/html:ro   # the shop page (keep in sync with docker-compose.yml)
 
   sale-1:
     environment:
