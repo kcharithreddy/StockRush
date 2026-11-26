@@ -197,6 +197,10 @@ services:
       ORDERS_PAYMENT_TIMEOUT_MINUTES: ${PAYMENT_TIMEOUT_MINUTES:-10}
       OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
       LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
+      # Ops assistant (POST /admin/assistant/summary): off unless OPENAI_API_KEY is set in .env.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      ALERTMANAGER_URL: http://alertmanager:9093
     ports:
       # Admin endpoints (Keycloak admin role required) for operators on this machine only.
       - "127.0.0.1:8090:8090"

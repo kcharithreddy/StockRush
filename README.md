@@ -281,6 +281,16 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 
 Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a vulnerability: [SECURITY.md](SECURITY.md).
 
+## Ops assistant (optional)
+
+Set `OPENAI_API_KEY` in `.env`, restart order-service, then ask for an AI-written status report:
+
+```bash
+curl -X POST -H "Authorization: Bearer $(scripts/token.sh shopadmin)" localhost:8090/admin/assistant/summary
+```
+
+It sends only aggregate numbers (stock, order counts per status, dead-letter counts, firing alert names), never user ids or order data; `GET /admin/assistant/facts` shows exactly what would be sent, for free. Off without a key, admin-only, at most one call per 30 s. Details: §20 of [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Limitations and next steps
 
 - **Keycloak runs in development mode** (plain HTTP, a password-grant client for scripts). Production: `start` behind TLS with a real hostname, and only the browser client with PKCE.

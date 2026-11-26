@@ -16,11 +16,13 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -43,6 +45,13 @@ public class DeadLetterService {
                              String error, String originalTopic, Long originalOffset) {
     }
 
+    /**
+     * Pending records counted by the exception class that sent them to the DLT. Holds no keys, payloads or
+     * exception messages (those can quote user ids or event content), so it is safe to share outside the system.
+     */
+    public record Summary(int pending, Map<String, Integer> byCause, Instant oldest, Instant newest) {
+    }
+
     private final ConsumerFactory<String, String> consumers;
     private final KafkaTemplate<String, String> producer;
 
@@ -62,6 +71,31 @@ public class DeadLetterService {
             });
         }
         return result;
+    }
+
+    /** Counts of the records not yet replayed. See {@link Summary} for what it leaves out. */
+    public Summary summary() {
+        Map<String, Integer> byCause = new TreeMap<>();
+        long[] range = {Long.MAX_VALUE, Long.MIN_VALUE};
+        int[] count = {0};
+        try (Consumer<String, String> consumer = open()) {
+            readPending(consumer, record -> {
+                count[0]++;
+                byCause.merge(simpleName(header(record, KafkaHeaders.DLT_EXCEPTION_CAUSE_FQCN)), 1, Integer::sum);
+                range[0] = Math.min(range[0], record.timestamp());
+                range[1] = Math.max(range[1], record.timestamp());
+            });
+        }
+        return count[0] == 0
+                ? new Summary(0, byCause, null, null)
+                : new Summary(count[0], byCause, Instant.ofEpochMilli(range[0]), Instant.ofEpochMilli(range[1]));
+    }
+
+    private static String simpleName(String className) {
+        if (className == null || className.isBlank()) {
+            return "unknown";
+        }
+        return className.substring(className.lastIndexOf('.') + 1);
     }
 
     /** Re-publishes every pending record to order-created and marks them replayed. Returns how many. */

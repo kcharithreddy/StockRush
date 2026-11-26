@@ -235,6 +235,8 @@ A token is accepted only if all of these hold: valid RS256 signature from the re
 | `GET /orders/{token}` | `{"status": "PENDING_PAYMENT" | "PAID" | "CANCELLED" | "PROCESSING"}` — PROCESSING if the caller has no such order (yet) |
 | `POST /orders/{token}/pay` | `UPDATE ... SET status='PAID' WHERE order_token=? AND user_id=? AND status='PENDING_PAYMENT'`; 200 `{"status":"PAID"}` if 1 row, else 409 `{"status":"NOT_PAYABLE"}` |
 | `POST /admin/sales/{id}/warmup` | stock in Redis = total_stock − count(orders PENDING_PAYMENT or PAID); sets `window`; returns `{"saleId","stock"}` |
+| `GET /admin/assistant/facts` | the aggregate snapshot the ops assistant would send (§20); no AI call |
+| `POST /admin/assistant/summary` | AI-written status report: 200 `{"summary","model","sentToModel"}`; 503 `ASSISTANT_DISABLED` without a key; 429 `TOO_SOON` (+`Retry-After`) within 30 s of the last call; 502 `AI_UNAVAILABLE` with only the provider's status and error code |
 | `POST /admin/sales/{id}/reset` | TEST ONLY: delete the sale's orders, delete `stock` and `buyers` keys, then warm-up. Exists only when `RESET_ENABLED=true`; otherwise 404 |
 
 Both `/orders` endpoints need the `buyer` role and only ever see the caller's own orders (`WHERE … AND user_id = <token sub>`): another user's token behaves exactly like an unknown one. A token that is not a UUID is 400. Nginx exposes `/orders/*` and `/sales/*` on :8080 and nothing else.
@@ -569,4 +571,34 @@ The page treats the sale as sold out only when the server says so (`410`). A sto
 - already bought, a non-buyer account, sold out, and a sale that is not open.
 
 In every run, zero cookies reached the API and there were no console or CSP errors.
+
+## 20. Ops assistant (optional, OpenAI)
+
+An admin asks `POST /admin/assistant/summary` (order-service, `admin` role, not routed by Nginx) and gets a short plain-text status report written by an OpenAI chat model: overall status, problems with likely causes, and next steps using the admin endpoints.
+
+**What is sent.** Only `OpsFacts`, built by `OpsFactsCollector`. `GET /admin/assistant/facts` returns exactly the same snapshot without calling the AI. It contains:
+
+- Per sale: window state, total stock, stock in Redis, order counts by status, and `unaccounted = totalStock - (stockInRedis + PENDING_PAYMENT + PAID)`. 0 is healthy; positive means lost orders; negative means an oversell.
+- Dead letters counted by exception class (`DeadLetterService.summary()`). Never keys, payloads or exception messages: database and JSON errors quote the event's values.
+- Firing alerts from Alertmanager's v2 API: name, severity, summary and start time only.
+- `unavailable`: sources that could not be read. One failing source never fails the snapshot.
+
+No user id, order token or other personal data. A test fails if any UUID appears in what is sent.
+
+**Safeguards.**
+
+- Off unless `OPENAI_API_KEY` is set in `.env`; the key is never logged or returned (`AssistantProperties.toString()` masks it).
+- At most one AI call per 30 s, failed calls included, as a cost guard.
+- Output is capped at 600 tokens and the request has a 30 s timeout.
+- Provider errors return only the HTTP status and error code, because OpenAI's error messages can echo part of the key.
+- The model is configurable (`OPENAI_MODEL`, default `gpt-4o-mini`), as is the API root (`OPENAI_BASE_URL`, for OpenAI-compatible providers).
+
+**Tested** against a fake OpenAI endpoint and a fake Alertmanager (`AssistantTest`, 6 tests):
+
+- aggregates only, with no UUIDs;
+- the exact request sent (bearer key, model, instructions, snapshot);
+- error mapping without the key;
+- failed sources listed rather than fatal;
+- admin role required;
+- off without a key, and the rate limit.
 
