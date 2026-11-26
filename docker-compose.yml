@@ -90,7 +90,7 @@ services:
         condition: service_healthy
 
   redis:
-    image: redis:7.4.12-alpine
+    image: redis:8.0.0-alpine
     command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
