@@ -26,6 +26,18 @@ public class RedisConfig {
         return RedisScript.of(new ClassPathResource("scripts/rate_limit.lua"), Long.class);
     }
 
+    /** Join the waiting room or read one's place in it. */
+    @Bean
+    public RedisScript<Long> queueScript() {
+        return RedisScript.of(new ClassPathResource("scripts/queue.lua"), Long.class);
+    }
+
+    /** Lets the next batch in, at most once per second across all instances. */
+    @Bean
+    public RedisScript<Long> admitScript() {
+        return RedisScript.of(new ClassPathResource("scripts/admit.lua"), Long.class);
+    }
+
     @Bean
     public NewTopic orderCreatedTopic() {
         return TopicBuilder.name(ORDER_CREATED_TOPIC).partitions(3).replicas(1).build();

@@ -40,7 +40,7 @@ class RedisScriptsTest {
     @Qualifier("rateLimitScript")
     RedisScript<Long> rateLimitScript;
 
-    private static final List<String> SALE_KEYS = List.of("sale:9:stock", "sale:9:buyers", "sale:9:window");
+    private static final List<String> SALE_KEYS = List.of("sale:9:stock", "sale:9:buyers", "sale:9:window", "sale:9:gate", "sale:9:admitted");
 
     @BeforeEach
     void flush() {

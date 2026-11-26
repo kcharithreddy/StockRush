@@ -32,6 +32,8 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.requireCsrfProtectionMatcher(SecurityConfig::carriesCookies))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, "/sales/*/buy").hasRole("buyer")
+                        .requestMatchers(HttpMethod.POST, "/sales/*/queue").hasRole("buyer")
+                        .requestMatchers(HttpMethod.GET, "/sales/*/queue").hasRole("buyer")
                         .requestMatchers(HttpMethod.GET, "/sales/*/stock").permitAll()
                         .requestMatchers("/actuator/**", "/error").permitAll()
                         .anyRequest().denyAll())

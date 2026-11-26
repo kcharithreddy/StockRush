@@ -499,7 +499,7 @@ docker compose run --rm db-migrate info   # show migration history
 
 ### Step C — after Phase 4
 
-- Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
+- ~~Virtual waiting room~~ — done: see §18. CAPTCHA at sign-up (Keycloak supports reCAPTCHA on registration).
 - ~~TLS at Nginx~~ — done: see §11. ~~Redis ACL users per service~~ — done: see the table above. Kafka SASL (Kafka is reachable only on the Docker network and `127.0.0.1`).
 - ~~Dead-letter topic for the consumer~~ — done: see §10, Order creation.
 - ~~Flyway migrations~~ — done: see §5.
@@ -509,3 +509,25 @@ docker compose run --rm db-migrate info   # show migration history
 - ~~Structured JSON logs with request ids~~ — done: see §13 Logs and request ids.
 - ~~Alerts~~ — done: see §13 Alerts.
 
+## 18. Virtual waiting room
+
+A sale can be sold through a waiting room (`flash_sales.waiting_room`, migration V4; demo: sale 2). Then nobody can buy until they have queued and been let in, which takes the advantage away from bots and from whoever's request happens to land first.
+
+**API** (role `buyer`, through Nginx):
+
+| Call | Answer |
+| :---- | :---- |
+| `POST /sales/{id}/queue` | join: `{"status":"WAITING","position":n}`, or `ADMITTED`, `NO_WAITING_ROOM` (the sale has none: buy directly), `SOLD_OUT` (410), `SALE_NOT_ACTIVE` (403) |
+| `GET /sales/{id}/queue` | the same, without joining; `NOT_IN_QUEUE` (404) if the caller never joined. Clients poll it about once a second (the per-user limit of 5 requests/s applies) |
+| `POST /sales/{id}/buy` before being admitted | `403 {"status":"NOT_ADMITTED"}` |
+
+**How it works** (all in Redis, all atomic Lua):
+
+- `queue.lua` adds the user to the sorted set `sale:{id}:queue`. Anyone who joins **before the sale opens** gets a random score in [0, 10⁹): a lottery, so being a millisecond faster gains nothing. Anyone joining **after** it opens gets 10⁹ + milliseconds since the start (microsecond precision), so they queue behind the lottery in arrival order. Joining twice keeps one's place.
+- `admit.lua` runs every second on every sale-service instance (`AdmissionScheduler`). An `INCR` on the per-second key `sale:{id}:admit:{epochSecond}` lets only the first caller in each second act; it then moves the next `flashsale.waiting-room.admit-per-second` users (default 200) from the queue into the set `sale:{id}:admitted`. Nobody is admitted before the sale opens or once stock is 0 (waiting users then see `SOLD_OUT`).
+- `buy.lua` checks the gate first: if `sale:{id}:gate` exists and the user is not in `sale:{id}:admitted`, it returns −3 (`NOT_ADMITTED`). The check is inside the same atomic script as the stock decrement, so it cannot be raced.
+- order-service's warm-up sets `sale:{id}:gate` and adds the sale to `sale:gated` (the list the admission job reads) when `waiting_room` is true, and removes both otherwise; reset empties the queue and the admitted set.
+
+**Load test** (`loadtest/waiting-room.js`): 2,000 honest buyers join, poll and buy once admitted, while 200 bots call buy directly. Exactly 100 honest buyers won, all 200 bot attempts got `NOT_ADMITTED` (0 bot orders in PostgreSQL), 757 waiting buyers were told `SOLD_OUT` instead of hammering buy, 0 errors.
+
+**Trade-off.** Admission is a fixed rate, not tied to remaining stock, so more people are admitted than there are units (1,243 for 100 in the load test); the extra admitted buyers simply get `410`. Admitting in proportion to remaining stock is a possible refinement. The waiting room limits who may buy; one-account-per-person still depends on account creation (CAPTCHA at sign-up is outside this project).

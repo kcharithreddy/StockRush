@@ -197,6 +197,10 @@ The timeout worker cancels overdue orders with one `UPDATE … RETURNING` (batch
 
 A user whose order expires stays in the buyers set and cannot buy again in that sale. It keeps the rule simple and stops a user from holding a unit, letting it expire and grabbing it again.
 
+### Waiting room (optional, per sale)
+
+A sale can be sold through a virtual waiting room (demo: sale 2). Buyers `POST /sales/{id}/queue`, poll `GET /sales/{id}/queue` until it says `ADMITTED`, then buy. People who join before the sale opens are shuffled (a lottery, so speed and bots gain nothing); later arrivals queue in order. Every second the next batch is admitted; a buy from anyone not admitted gets `403 NOT_ADMITTED`, checked inside the same atomic Lua script as the stock decrement. In the load test, 200 bots calling buy directly were all refused while exactly 100 of 2,000 queued buyers won. Details: ARCHITECTURE.md §18.
+
 ## Failure scenarios
 
 | What fails | What happens |
@@ -269,7 +273,7 @@ Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a v
 ## Limitations and next steps
 
 - **Keycloak runs in development mode** (plain HTTP, a password-grant client for scripts). Production: `start` behind TLS with a real hostname, and only the browser client with PKCE.
-- **Bots.** One account per purchase is only as strong as account creation. Next: a virtual waiting room / queue token before the sale opens, CAPTCHA on suspicious traffic.
+- **Bots.** The waiting room stops queue-jumping, but one account per purchase is only as strong as account creation. Next: CAPTCHA at sign-up.
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
 - **TLS** at Nginx and between services; Kafka SASL; per-service Redis ACL users.
 - **Alert delivery.** Alerts fire in Alertmanager but no receiver is configured; production would route `critical` to an on-call pager.

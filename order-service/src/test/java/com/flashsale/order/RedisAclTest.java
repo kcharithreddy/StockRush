@@ -23,7 +23,7 @@ class RedisAclTest extends IntegrationTest {
         assertThatThrownBy(() -> redis.execute(RedisScript.of("return 1", Long.class), List.of("sale:5:stock")))
                 .hasStackTraceContaining("NOPERM");
         assertThatThrownBy(() -> redis.opsForValue().get("rl:someone:1")).hasStackTraceContaining("NOPERM");
-        assertThatThrownBy(() -> redis.opsForSet().add("sale:5:buyers", "x")).hasStackTraceContaining("NOPERM");
+        assertThatThrownBy(() -> redis.opsForZSet().add("sale:5:queue", "x", 1)).hasStackTraceContaining("NOPERM");
         assertThatThrownBy(() -> redis.getConnectionFactory().getConnection().serverCommands().flushAll())
                 .hasStackTraceContaining("NOPERM");
     }

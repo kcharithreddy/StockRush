@@ -2,12 +2,13 @@
 # the services' tests load this same file, so what is tested is what runs.
 #
 # default        operators only (redis-cli, debugging). The services never use it.
-# sale-service   the buy path: buy.lua and rate_limit.lua (EVALSHA/EVAL), stock reads, compensation.
-#                Keys sale:* and rl:* only. Commands called inside the Lua scripts are checked against
-#                this list too, so they are listed explicitly (GET DECR SISMEMBER SADD INCR EXPIRE TIME).
-# order-service  warm-up, reset, stock restore and reconciliation. Keys sale:* only; no scripts.
+# sale-service   the buy path: buy.lua, rate_limit.lua, and the waiting room (queue.lua, admit.lua), stock
+#                reads, compensation. Keys sale:* and rl:* only. Commands called inside the Lua scripts are
+#                checked against this list too, so they are listed explicitly.
+# order-service  warm-up, reset, stock restore, reconciliation, and the list of sales with a waiting room
+#                (SADD/SREM sale:gated). Keys sale:* only; no scripts.
 # Neither service can run FLUSHALL, KEYS, CONFIG, DEBUG, SHUTDOWN or anything outside its keys.
 
 user default on >${REDIS_PASSWORD} ~* &* +@all
-user sale-service on >${REDIS_SALE_PASSWORD} resetchannels ~sale:* ~rl:* -@all +@connection +info +time +get +incr +decr +expire +sismember +sadd +srem +eval +evalsha +script|load +script|exists
-user order-service on >${REDIS_ORDER_PASSWORD} resetchannels ~sale:* -@all +@connection +info +get +set +incr +del
+user sale-service on >${REDIS_SALE_PASSWORD} resetchannels ~sale:* ~rl:* -@all +@connection +info +time +get +incr +decr +expire +sismember +sadd +srem +smembers +zadd +zrank +zpopmin +eval +evalsha +script|load +script|exists
+user order-service on >${REDIS_ORDER_PASSWORD} resetchannels ~sale:* -@all +@connection +info +get +set +incr +del +sadd +srem

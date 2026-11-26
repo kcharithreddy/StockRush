@@ -1,6 +1,7 @@
 -- KEYS[1] = sale:{id}:stock   KEYS[2] = sale:{id}:buyers   KEYS[3] = sale:{id}:window
+-- KEYS[4] = sale:{id}:gate    KEYS[5] = sale:{id}:admitted
 -- ARGV[1] = userId
--- Returns: 1 success | 0 sold out | -1 already bought | -2 sale not active
+-- Returns: 1 success | 0 sold out | -1 already bought | -2 sale not active | -3 not admitted (waiting room)
 -- "now" comes from Redis's own clock, so every sale-service instance judges the window identically.
 local window = redis.call('GET', KEYS[3])
 if not window then return -2 end
@@ -10,6 +11,8 @@ local endsAt = tonumber(string.sub(window, sep + 1))
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 if now < startsAt or now > endsAt then return -2 end
+-- A sale with a waiting room only sells to buyers the admission job has let in.
+if redis.call('GET', KEYS[4]) and redis.call('SISMEMBER', KEYS[5], ARGV[1]) == 0 then return -3 end
 if redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then return -1 end
 local stock = tonumber(redis.call('GET', KEYS[1]) or '0')
 if stock <= 0 then return 0 end

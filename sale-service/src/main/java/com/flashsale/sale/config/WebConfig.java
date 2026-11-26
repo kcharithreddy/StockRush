@@ -16,6 +16,6 @@ public class WebConfig implements WebMvcConfigurer {
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(userRateLimiter).addPathPatterns("/sales/*/buy");
+        registry.addInterceptor(userRateLimiter).addPathPatterns("/sales/*/buy", "/sales/*/queue");
     }
 }

@@ -45,8 +45,15 @@ public class SaleAdminService {
         redis.opsForValue().set(RedisKeys.stock(saleId), Long.toString(stock));
         redis.opsForValue().set(RedisKeys.window(saleId),
                 sale.getStartsAt().toEpochMilli() + "," + sale.getEndsAt().toEpochMilli());
+        if (sale.hasWaitingRoom()) {
+            redis.opsForValue().set(RedisKeys.gate(saleId), "1");
+            redis.opsForSet().add(RedisKeys.GATED_SALES, Long.toString(saleId));
+        } else {
+            redis.delete(RedisKeys.gate(saleId));
+            redis.opsForSet().remove(RedisKeys.GATED_SALES, Long.toString(saleId));
+        }
 
-        log.info("Warmed up sale {}: total={}, held={}, stock={}", saleId, sale.getTotalStock(), held, stock);
+        log.info("Warmed up sale {}: total={}, held={}, stock={}, waitingRoom={}", saleId, sale.getTotalStock(), held, stock, sale.hasWaitingRoom());
         return new WarmupResponse(saleId, stock);
     }
 
@@ -55,8 +62,9 @@ public class SaleAdminService {
     public WarmupResponse reset(long saleId) {
         findSale(saleId);
         int deleted = orders.deleteBySaleId(saleId);
-        redis.delete(List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId)));
-        log.warn("Reset sale {}: deleted {} orders and Redis stock/buyers", saleId, deleted);
+        redis.delete(List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId),
+                RedisKeys.queue(saleId), RedisKeys.admitted(saleId)));
+        log.warn("Reset sale {}: deleted {} orders and Redis stock, buyers and waiting room", saleId, deleted);
         return warmup(saleId);
     }
 

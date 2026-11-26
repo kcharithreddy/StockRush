@@ -70,7 +70,8 @@ public class BuyService {
         }
 
         Long result = redis.execute(buyScript,
-                List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId), RedisKeys.window(saleId)),
+                List.of(RedisKeys.stock(saleId), RedisKeys.buyers(saleId), RedisKeys.window(saleId),
+                        RedisKeys.gate(saleId), RedisKeys.admitted(saleId)),
                 userId.toString());
         if (result == null) {
             throw new IllegalStateException("buy.lua returned no result");
