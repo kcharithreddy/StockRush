@@ -134,7 +134,7 @@ services:
       start_period: 15s
 
   keycloak:
-    image: keycloak/keycloak:26.4.0
+    image: keycloak/keycloak:26.8.2-3
     # start-dev: plain HTTP, for a developer machine only. Production runs `start` behind TLS.
     command: ["start-dev", "--import-realm"]
     restart: unless-stopped
