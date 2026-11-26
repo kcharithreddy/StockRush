@@ -230,6 +230,7 @@ services:
       - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./infra/nginx-ratelimit.conf:/etc/nginx/ratelimit.conf:ro
       - ./infra/tls:/etc/nginx/tls:ro
+      - ./web:/usr/share/nginx/html:ro   # the shop page
     depends_on:
       sale-1:
         condition: service_healthy

@@ -94,6 +94,8 @@ flash-sale-system/
 │   └── src/main/resources/scripts/buy.lua
 ├── order-service/           # Spring Boot app, package com.flashsale.order
 │   └── Dockerfile
+├── web/                     # the shop page: index.html, app.js, app.css (static, no build step; served by Nginx)
+├── scripts/                 # dev-cert.sh, token.sh, keycloak-web-client.sh
 ├── docker-compose.loadtest.yml  # override: per-IP limit off for k6
 ├── loadtest/
 │   ├── flash-sale.js
@@ -531,3 +533,40 @@ A sale can be sold through a waiting room (`flash_sales.waiting_room`, migration
 **Load test** (`loadtest/waiting-room.js`): 2,000 honest buyers join, poll and buy once admitted, while 200 bots call buy directly. Exactly 100 honest buyers won, all 200 bot attempts got `NOT_ADMITTED` (0 bot orders in PostgreSQL), 757 waiting buyers were told `SOLD_OUT` instead of hammering buy, 0 errors.
 
 **Trade-off.** Admission is a fixed rate, not tied to remaining stock, so more people are admitted than there are units (1,243 for 100 in the load test); the extra admitted buyers simply get `410`. Admitting in proportion to remaining stock is a possible refinement. The waiting room limits who may buy; one-account-per-person still depends on account creation (CAPTCHA at sign-up is outside this project).
+
+## 19. Shop page (web/)
+
+A single static page that a buyer uses to log in, watch the stock, buy, wait in the waiting room and pay. Plain HTML, CSS and JavaScript: no framework, no third-party code, no build step. Nginx serves it at `https://localhost:8443/` from a read-only mount of `web/`, on the same origin as the API, so there is no CORS on the API.
+
+**Login.** OpenID Connect authorization code flow with PKCE (S256) against Keycloak's public client `stockrush-web`, written by hand in `app.js` (about 80 lines). The PKCE verifier, the `state` and the chosen sale wait in `sessionStorage` only for the round trip to Keycloak; `state` is checked on return. Access, refresh and ID tokens are kept **in memory only**: no script can find them in `localStorage` or cookies, and a reload goes back through Keycloak (instant while its session is alive). The access token is refreshed 30 s before it expires; logout ends the Keycloak session.
+
+**Calls.** Every API call sends `Authorization: Bearer …` and `credentials: "omit"`. Cookies ignore ports, so without that a cookie for `localhost` from another local app (Grafana's, for example) would reach the services and switch on their CSRF check for cookie-carrying requests (§17).
+
+**Flow.**
+
+1. The page polls `GET /sales/{id}/stock` every 2 s while it is visible.
+2. Buy sends `POST /sales/{id}/buy`, with these outcomes:
+   - `202`: the order token is kept in `sessionStorage` (per sale and user) and the page polls `GET /orders/{token}` until the order leaves `PROCESSING`.
+   - `NOT_ADMITTED`: the page joins the waiting room (`POST /sales/{id}/queue`), polls the queue every 2 s, and buys as soon as it is `ADMITTED`.
+   - `410`, `409`, `SALE_NOT_ACTIVE` and `429` each get a plain message.
+3. `PENDING_PAYMENT` shows a Pay button, which sends `POST /orders/{token}/pay`.
+
+The page treats the sale as sold out only when the server says so (`410`). A stock of 0 can also mean the sale has not been warmed up yet, and buy then answers `SALE_NOT_ACTIVE`.
+
+**Headers.** Nginx picks the Content Security Policy by path:
+
+- The page's four files get: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' http://localhost:8180; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. The Keycloak origin must match `stockrush-issuer` in `web/index.html` and `KC_HOSTNAME`.
+- The API keeps `default-src 'none'`.
+- The page's files are sent with `Cache-Control: no-cache`, so a new version shows at once.
+
+**Keycloak.** `stockrush-web` allows only `https://localhost:8443/*` and `https://127.0.0.1:8443/*` as redirect and post-logout URLs, and the same origins for CORS on the token endpoint. Keycloak imports the realm file only when the realm does not exist, so an existing installation is updated with `scripts/keycloak-web-client.sh`, which uses `kcadm` and is safe to re-run.
+
+**Tested** in Chromium (Playwright) against the running stack. These cases passed:
+
+- login, buy, reserve, pay, and resuming the order after a reload;
+- logout;
+- the waiting room on sale 2: `403` → queue → admitted → `202`;
+- already bought, a non-buyer account, sold out, and a sale that is not open.
+
+In every run, zero cookies reached the API and there were no console or CSP errors.
+

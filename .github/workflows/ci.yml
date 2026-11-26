@@ -96,3 +96,22 @@ jobs:
             -v "$PWD/infra/nginx-ratelimit.conf:/etc/nginx/ratelimit.conf:ro" \
             -v "$PWD/infra/tls:/etc/nginx/tls:ro" \
             "$NGINX" nginx -t
+
+  web:
+    name: Check shop page
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: JavaScript syntax
+        run: node --check web/app.js
+      - name: Nginx CSP allows the page's Keycloak and nothing else is loaded from outside
+        run: |
+          issuer=$(grep -oE 'name="stockrush-issuer" content="[^"]+"' web/index.html | sed -E 's/.*content="([^"]+)"/\1/')
+          origin=$(printf '%s' "$issuer" | grep -oE '^https?://[^/]+')
+          echo "Keycloak origin: $origin"
+          grep -q "connect-src 'self' $origin;" infra/nginx.conf || { echo "infra/nginx.conf connect-src does not allow $origin"; exit 1; }
+          # Only same-origin scripts and styles: no http(s) URLs in src= or href= attributes.
+          if grep -nE '(src|href)="https?://' web/index.html; then echo "web/index.html loads something from another origin"; exit 1; fi
