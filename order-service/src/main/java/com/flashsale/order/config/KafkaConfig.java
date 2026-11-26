@@ -51,12 +51,19 @@ public class KafkaConfig {
         DeadLetterPublishingRecoverer toDeadLetterTopic = new DeadLetterPublishingRecoverer(template,
                 (record, error) -> new TopicPartition(DEAD_LETTER_TOPIC, record.partition()));
 
+        // A small, fixed set of reasons, each registered at 0 up front: Prometheus increase() cannot see the
+        // first event of a series that is born at 1, and exception class names are not a bounded label.
+        for (String reason : DEAD_LETTER_REASONS) {
+            meters.counter(DEAD_LETTER_METRIC, "reason", reason);
+        }
+
         ConsumerRecordRecoverer recoverer = (record, error) -> {
             Throwable cause = rootCause(error);
-            log.error("Dead-lettering {}-{}@{} (key {}): {}: {}", record.topic(), record.partition(),
-                    record.offset(), record.key(), cause.getClass().getSimpleName(), cause.getMessage());
+            String reason = reason(error);
+            log.error("Dead-lettering {}-{}@{} (key {}) [{}]: {}: {}", record.topic(), record.partition(),
+                    record.offset(), record.key(), reason, cause.getClass().getName(), cause.getMessage());
             toDeadLetterTopic.accept(record, error);
-            meters.counter(DEAD_LETTER_METRIC, "reason", cause.getClass().getSimpleName()).increment();
+            meters.counter(DEAD_LETTER_METRIC, "reason", reason).increment();
         };
 
         ExponentialBackOff backOff = new ExponentialBackOff(500, 2.0);
@@ -68,6 +75,25 @@ public class KafkaConfig {
                 DataIntegrityViolationException.class,
                 DeserializationException.class);
         return handler;
+    }
+
+    static final java.util.List<String> DEAD_LETTER_REASONS =
+            java.util.List.of("invalid_event", "integrity_violation", "undeserializable", "retries_exhausted");
+
+    /** invalid_event / integrity_violation / undeserializable never succeed; anything else ran out of retries. */
+    static String reason(Throwable error) {
+        for (Throwable t = error; t != null; t = t.getCause() == t ? null : t.getCause()) {
+            if (t instanceof InvalidEventException) {
+                return "invalid_event";
+            }
+            if (t instanceof DataIntegrityViolationException) {
+                return "integrity_violation";
+            }
+            if (t instanceof DeserializationException) {
+                return "undeserializable";
+            }
+        }
+        return "retries_exhausted";
     }
 
     private static Throwable rootCause(Throwable error) {

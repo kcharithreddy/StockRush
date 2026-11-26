@@ -236,6 +236,7 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/alerting/alerts.yml:/etc/prometheus/alerts.yml:ro
       - promdata:/prometheus
     security_opt:
       - no-new-privileges:true
@@ -243,6 +244,21 @@ services:
       - sale-1
       - sale-2
       - order-service
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./infra/alerting/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertdata:/alertmanager
+    security_opt:
+      - no-new-privileges:true
 
   grafana:
     image: grafana/grafana:12.1.0
@@ -271,3 +287,4 @@ volumes:
   redisdata:
   promdata:
   grafanadata:
+  alertdata:

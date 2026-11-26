@@ -97,6 +97,7 @@ Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 | http://localhost:8090 | order-service admin (host only) |
 | http://localhost:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`) |
 | http://localhost:9090 | Prometheus |
+| http://localhost:9093 | Alertmanager (alerts: oversell risk, service down, dead-lettered events, errors, latency, consumer lag) |
 | http://localhost:8180 | Keycloak (admin console: `admin` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`) |
 
 The database schema comes from Flyway migrations in `infra/db/migration`, applied automatically by the one-shot `db-migrate` container on `docker compose up`; new migrations apply to an existing database without losing data. If you ran a version of this repo from before migrations existed, recreate the database once (`docker compose down -v`).
@@ -268,4 +269,5 @@ Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a v
 - **Bots.** One account per purchase is only as strong as account creation. Next: a virtual waiting room / queue token before the sale opens, CAPTCHA on suspicious traffic.
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
 - **TLS** at Nginx and between services; Kafka SASL; per-service Redis ACL users.
-- **Alerts** on `redis_high`, consumer lag and 5xx rate; structured JSON logs with request ids.
+- **Alert delivery.** Alerts fire in Alertmanager but no receiver is configured; production would route `critical` to an on-call pager.
+- **Structured JSON logs** with request ids.

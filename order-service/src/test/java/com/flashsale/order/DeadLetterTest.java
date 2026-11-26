@@ -112,4 +112,12 @@ class DeadLetterTest extends IntegrationTest {
         await("garbage to be parked again", () -> deadLetters.pending(10).size() == 1);
         assertThat(deadLetters.pending(10).get(0).payload()).isEqualTo("this is not json");
     }
+
+    @Test
+    void deadLetterReasonsAreABoundedSetRegisteredAtZero() {
+        for (String reason : java.util.List.of("invalid_event", "integrity_violation", "undeserializable", "retries_exhausted")) {
+            assertThat(meters.find("flashsale.orders.dead.lettered").tag("reason", reason).counter())
+                    .as(reason).isNotNull();
+        }
+    }
 }

@@ -50,6 +50,10 @@ public class ReconciliationService {
         this.redis = redis;
         this.meters = meters;
         this.clock = clock;
+        // Register both series at 0 up front. A counter that first appears already at 1 is invisible to
+        // Prometheus increase(), so the very first oversell signal would never alert.
+        meters.counter(METRIC, "direction", "redis_high");
+        meters.counter(METRIC, "direction", "redis_low");
     }
 
     @Transactional(readOnly = true)

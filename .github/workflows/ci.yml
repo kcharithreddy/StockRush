@@ -52,3 +52,23 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config --quiet
+
+  alerts:
+    name: Test alert rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check and unit-test Prometheus rules
+        run: |
+          docker run --rm -v "$PWD/infra/alerting:/rules:ro" -w /rules --entrypoint /bin/promtool \
+            prom/prometheus:v3.5.0 check rules alerts.yml
+          docker run --rm -v "$PWD/infra/alerting:/rules:ro" -w /rules --entrypoint /bin/promtool \
+            prom/prometheus:v3.5.0 test rules alerts.test.yml
+      - name: Check Alertmanager config
+        run: |
+          docker run --rm -v "$PWD/infra/alerting:/c:ro" --entrypoint /bin/amtool \
+            prom/alertmanager:v0.28.1 check-config /c/alertmanager.yml
+

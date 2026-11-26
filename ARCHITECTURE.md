@@ -338,9 +338,26 @@ Both services: Actuator with `health,prometheus` exposed on the separate `MANAGE
 - `flashsale_buy_total{result="SUCCESS|SOLD_OUT|ALREADY_BOUGHT|NOT_ACTIVE|TRY_AGAIN"}` (sale-service)
 - `flashsale_orders_placed_total`, `flashsale_orders_expired_total`, `flashsale_orders_paid_total` (order-service). The spec originally said `flashsale_orders_created_total`, but the Prometheus client strips a trailing `_created` (an OpenMetrics reserved suffix), so that name cannot be exported.
 - `flashsale_reconcile_mismatch_total{direction}` (order-service)
-- `flashsale_orders_dead_lettered_total{reason}` (order-service): records parked on `order-created.DLT`, by root-cause exception
+- `flashsale_orders_dead_lettered_total{reason}` (order-service): records parked on `order-created.DLT`, by reason — one of `invalid_event`, `integrity_violation`, `undeserializable`, `retries_exhausted`, all registered at 0 on startup so the first event is visible to `increase()`. The exact exception is in the log and the record headers
 
 Prometheus (`infra/prometheus.yml`) scrapes `sale-1:9080`, `sale-2:9080` and `order-service:9091` every 5 s. Grafana provisions the datasource and the **StockRush — Flash Sale** dashboard from `infra/grafana/`. Its stat panels count exactly within the selected time range (`max_over_time − min_over_time`), not with `increase()`, whose extrapolation would show e.g. 313 for 300 orders.
+
+### Alerts
+
+Rules in `infra/alerting/alerts.yml`, loaded by Prometheus and sent to Alertmanager (http://localhost:9093). `infra/alerting/alerts.test.yml` unit-tests them with `promtool`, and CI runs those tests on every pull request.
+
+| Alert | Fires when | Severity |
+| :---- | :---- | :---- |
+| `OversellRisk` | any `redis_high` reconciliation mismatch in 5 min | critical |
+| `ServiceDown` | a sale-service or order-service instance cannot be scraped for 1 min | critical |
+| `StockHeldWithoutOrders` | ≥ 5 `redis_low` mismatches in 10 min (more than in-flight events explain) | warning |
+| `OrderEventsDeadLettered` | any event parked on `order-created.DLT` in 5 min, per reason | warning |
+| `HighServerErrorRate` | > 2 % of a service's requests are 5xx for 2 min (the normal flood of 410s is not an error) | warning |
+| `OrderEventsNotPublished` | winners keep getting `503 TRY_AGAIN` (Kafka unreachable) for 2 min | warning |
+| `BuyLatencyHigh` | buy p95 > 1 s for 5 min | warning |
+| `OrderConsumerLagging` | > 500 events behind on `order-created` for 2 min | warning |
+
+Every counter an alert relies on is registered at 0 when its service starts (`redis_high`/`redis_low`, and the four bounded dead-letter reasons). A counter that first appears already at 1 is invisible to `increase()`: a live drill showed the first dead-lettered event, and therefore the first oversell signal, would otherwise never alert. Alertmanager has no receiver configured (nothing to send to on a developer machine); `alertmanager.yml` explains how to add Slack, e-mail or PagerDuty. While a service is down its warnings are inhibited. Prometheus reads rules at startup: after editing them, `docker compose restart prometheus`.
 
 Grafana panels (document the PromQL in README):
 
@@ -478,5 +495,6 @@ docker compose run --rm db-migrate info   # show migration history
 - ~~Flyway migrations~~ — done: see §5.
 - Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
 - Image scanning in CI; branch protection on `main`.
-- Structured JSON logs with request ids; alerts on `flashsale_reconcile_mismatch_total`.
+- Structured JSON logs with request ids.
+- ~~Alerts~~ — done: see §13 Alerts.
 
