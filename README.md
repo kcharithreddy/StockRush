@@ -3,7 +3,7 @@
 High-concurrency flash-sale backend that never oversells: atomic Redis Lua stock control, Kafka async order pipeline, Spring Boot microservices, and PostgreSQL, load-tested with k6 and monitored in Grafana.
 
 > **20,000 buy attempts from 20,000 users against 100 units: exactly 100 orders, three runs in a row.**
-> Up to 5,900 requests/s, p95 321–476 ms, zero errors, on a single 4-vCPU machine that also ran k6 and the whole stack.
+> Every request carries a verified Keycloak-style JWT: up to 3,300 requests/s, p95 658 ms, zero errors, on a single 4-vCPU machine that also ran k6 and the whole stack (5,900 requests/s before authentication was added).
 > Details: [docs/loadtest-results.md](docs/loadtest-results.md).
 
 ![Grafana dashboard during the load test](docs/grafana-dashboard.png)
@@ -37,7 +37,8 @@ The full specification is [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```mermaid
 flowchart LR
-    U[Users / k6] -->|":8080"| N[Nginx<br/>per-IP limit, round-robin]
+    U[Users / k6] -->|"login"| KC[Keycloak<br/>realm stockrush]
+    U -->|":8080 + Bearer token"| N[Nginx<br/>per-IP limit, round-robin]
     N -->|/sales/*| S1[sale-service #1]
     N -->|/sales/*| S2[sale-service #2]
     N -->|/orders/*| O[order-service]
@@ -48,10 +49,12 @@ flowchart LR
     O -->|"warm-up, stock restore"| R
     PR[Prometheus] -.scrapes.-> S1 & S2 & O
     G[Grafana] -.-> PR
+    S1 & S2 & O -.signing keys.-> KC
 ```
 
 | Component | Role |
 | :-- | :-- |
+| **Keycloak** | Identity provider. Users log in here and get short-lived access tokens; both services verify them. Roles: `buyer`, `admin`. |
 | **Nginx** | The only public entry point. Round-robins `sale-1`/`sale-2`, routes `/orders/*` to order-service, rate-limits buys per IP, and refuses every other path (`/admin`, `/actuator`). |
 | **sale-service** (×2) | Stateless buy path. No database connection. Runs the Lua script, publishes `OrderCreated` to Kafka, rate-limits per user. |
 | **Redis** | Hot state: remaining stock, the set of buyers, the sale window, rate-limit counters. AOF persistence. |
@@ -60,7 +63,7 @@ flowchart LR
 | **PostgreSQL** | Source of truth for orders. |
 | **Prometheus + Grafana** | Metrics and the provisioned dashboard above. |
 
-Tech: Java 17, Spring Boot 3.5, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
+Tech: Java 17, Spring Boot 3.5, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
 
 ## Run it
 
@@ -73,15 +76,20 @@ cp .env.example .env              # then change the passwords in .env
 docker compose up -d --build
 ```
 
-Open a sale and buy:
+Log in as the demo users (`buyer1`, `buyer2`, `shopadmin`; password `DEMO_USER_PASSWORD` from `.env`), open the sale and buy:
 
 ```bash
-curl -X POST localhost:8090/admin/sales/1/warmup                      # admin: host only → {"saleId":1,"stock":100}
-curl -X POST -H "X-User-Id: 1" localhost:8080/sales/1/buy             # → {"status":"PROCESSING","orderToken":"…"}
-curl -H "X-User-Id: 1" localhost:8080/orders/<orderToken>             # → {"status":"PENDING_PAYMENT"}
-curl -X POST -H "X-User-Id: 1" localhost:8080/orders/<orderToken>/pay # → {"status":"PAID"}
-curl localhost:8080/sales/1/stock                                     # → {"stock":99}
+ADMIN=$(scripts/token.sh shopadmin)
+BUYER=$(scripts/token.sh buyer1)
+
+curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/warmup        # → {"saleId":1,"stock":100}
+curl -X POST -H "Authorization: Bearer $BUYER" localhost:8080/sales/1/buy                 # → {"status":"PROCESSING","orderToken":"…"}
+curl -H "Authorization: Bearer $BUYER" localhost:8080/orders/<orderToken>                 # → {"status":"PENDING_PAYMENT"}
+curl -X POST -H "Authorization: Bearer $BUYER" localhost:8080/orders/<orderToken>/pay     # → {"status":"PAID"}
+curl localhost:8080/sales/1/stock                                                         # → {"stock":99} (public)
 ```
+
+Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 
 | URL | What |
 | :-- | :-- |
@@ -89,28 +97,25 @@ curl localhost:8080/sales/1/stock                                     # → {"st
 | http://localhost:8090 | order-service admin (host only) |
 | http://localhost:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`) |
 | http://localhost:9090 | Prometheus |
+| http://localhost:8180 | Keycloak (admin console: `admin` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`) |
 
-`X-User-Id` is a mock identity header. Production would take the user from a JWT; that is the next step on the roadmap (Keycloak, see [Security](#security)).
+If you ran an older version of this repo, recreate the database once (`docker compose down -v`): user ids changed from numbers to Keycloak UUIDs.
 
 ### Run the load test
 
-All k6 traffic comes from one IP, so the per-IP limit in Nginx has to be off. Either start Nginx with the load-test override, which swaps the limit file for an empty one:
+The load test needs 20,000 different authenticated users, and logging 20,000 people into Keycloak is not the point of the test. So the load-test override does two things: it turns off the per-IP limit in Nginx (all k6 traffic is one IP), and it lets the services also accept tokens that k6 signs itself as the `stockrush-loadtest` issuer, with `LOADTEST_JWT_SECRET` from `.env`. The normal stack never trusts that issuer.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx
-```
-
-or comment out the `limit_req` line in `infra/nginx-ratelimit.conf` and run `docker compose restart nginx`. Then:
-
-```bash
-curl -X POST localhost:8090/admin/sales/1/reset     # TEST ONLY: wipes the sale's orders, stock back to 100
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d
+set -a; . ./.env; set +a
+curl -X POST -H "Authorization: Bearer $(scripts/token.sh shopadmin)" localhost:8090/admin/sales/1/reset   # TEST ONLY
 sleep 6                                             # let the sold-out flags expire
-k6 run loadtest/flash-sale.js
+k6 run -e LOADTEST_JWT_SECRET loadtest/flash-sale.js
 # or, without installing k6:
-docker run --rm -i --network host -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
+docker run --rm -i --network host -e LOADTEST_JWT_SECRET -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
 ```
 
-The run passes only if exactly 100 attempts win and nothing returns a 5xx. Restore normal Nginx afterwards with `docker compose up -d nginx`.
+The run passes only if exactly 100 attempts win and nothing returns an unexpected status. Go back to the normal stack afterwards with `docker compose up -d`.
 
 ### Tests
 
@@ -133,8 +138,8 @@ sequenceDiagram
     participant O as order-service
     participant P as PostgreSQL
 
-    C->>S: POST /sales/1/buy (X-User-Id)
-    Note over S: per-user rate limit (Redis)<br/>local sold-out flag → 410 at once
+    C->>S: POST /sales/1/buy (Bearer token)
+    Note over S: verify token: signature, issuer, audience,<br/>expiry, role buyer → user id = sub<br/>per-user rate limit (Redis)<br/>local sold-out flag → 410 at once
     S->>R: EVALSHA buy.lua
     alt stock left, user new, sale active
         R-->>S: 1 (DECR stock, SADD buyer)
@@ -209,15 +214,16 @@ A user whose order expires stays in the buyers set and cannot buy again in that 
 | :-- | :-- |
 | Attempts per run | 20,000 (1000 virtual users, every attempt a different user) |
 | Stock | 100 |
-| Winners per run | **exactly 100**, in 3 of 3 runs |
+| Winners per run | **exactly 100**, in every run (3 before and 6 after authentication) |
 | Orders in PostgreSQL | 100 per run, Redis stock 0, 100 buyers |
 | Errors (5xx or unexpected status) | 0 |
-| Throughput | 4,647 – 5,868 req/s |
-| Latency (all requests) | p50 98–121 ms, p95 321–476 ms, p99 455–581 ms |
+| Throughput, every request authenticated (Step B, warm JVMs) | 2,176 – 3,293 req/s |
+| Latency, authenticated | p50 248–345 ms, p95 658–1,138 ms, p99 748–1,611 ms |
+| Throughput before authentication (Phase 4) | 4,647 – 5,868 req/s, p95 321–476 ms |
 | Load balance | Even split between `sale-1` and `sale-2` |
 | Reconciliation mismatches | 0 |
 
-Everything — k6, Nginx, both JVMs, order-service, Redis, Kafka, PostgreSQL, Prometheus, Grafana — shared one 4-vCPU machine, so the latency figures are a baseline, not a capacity limit. Full output: [docs/loadtest-results.md](docs/loadtest-results.md).
+Everything — k6, Nginx, both JVMs, order-service, Redis, Kafka, PostgreSQL, Keycloak, Prometheus, Grafana — shared one 4-vCPU machine (load average 16.8 during the authenticated runs), so the latency figures are a baseline, not a capacity limit. Authentication costs about 40 % of throughput on this box, partly because k6 signs a token per request on the same cores. Full output: [docs/loadtest-results.md](docs/loadtest-results.md).
 
 ## Monitoring
 
@@ -245,6 +251,7 @@ sum by (instance) (rate(http_server_requests_seconds_count{uri!~"/actuator.*"}[3
 
 ## Security
 
+- **Identity:** users authenticate with Keycloak. Every protected request carries a short-lived access token whose signature, issuer, audience and expiry are checked; the user id is the token's subject. Buying and orders need the `buyer` role, `/admin/**` the `admin` role. Forged, tampered, expired or foreign tokens get 401.
 - Only Nginx is published beyond `127.0.0.1`; it routes `/sales/*` and `/orders/*` and nothing else.
 - Every password comes from a git-ignored `.env`; services refuse to start without them.
 - Redis requires a password; services use a least-privilege PostgreSQL role that cannot change the schema.
@@ -256,7 +263,7 @@ Full list and roadmap: §17 of [ARCHITECTURE.md](ARCHITECTURE.md). To report a v
 
 ## Limitations and next steps
 
-- **Identity is a mock header.** Next: Keycloak, both services as OAuth2 resource servers, the user id taken from the JWT, an `admin` role for `/admin/**` (Step B).
+- **Keycloak runs in development mode** (plain HTTP, a password-grant client for scripts). Production: `start` behind TLS with a real hostname, and only the browser client with PKCE.
 - **Bots.** One account per purchase is only as strong as account creation. Next: a virtual waiting room / queue token before the sale opens, CAPTCHA on suspicious traffic.
 - **Single nodes.** Redis, Kafka and PostgreSQL each run as one node. Production would use Redis with replicas (or Sentinel), a 3-broker Kafka cluster with replication 3, and a PostgreSQL primary with a standby.
 - **Poison messages are skipped, not parked.** Next: a dead-letter topic.

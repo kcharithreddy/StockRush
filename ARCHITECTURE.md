@@ -24,6 +24,7 @@ A flash-sale backend: thousands of users try to buy a small, fixed stock (e.g. 1
 | Containers | Docker Compose (single `docker-compose.yml` at repo root) |
 | Load testing | k6 |
 | Monitoring | Micrometer + Prometheus + Grafana |
+| Identity | Keycloak 26 (OIDC), image `keycloak/keycloak:26.4.0`; services are Spring Security OAuth2 resource servers |
 
 No Lombok. Use Java records for DTOs/events. Use `JdbcTemplate` for the hot paths in order-service (insert, pay, expire); JPA is fine for admin/read code.
 
@@ -55,6 +56,7 @@ Nginx :8080  ── per-IP rate limit on buy, round-robin; routes only /sales/* 
                 ▼
         PostgreSQL :5432  (source of truth for orders)
 
+Keycloak :8180 issues the users' access tokens (realm stockrush); both services verify them
 Prometheus :9090 scrapes sale-1, sale-2 (:9080) and order-service (:9091) at /actuator/prometheus
 (management ports, never published outside the Docker network)
 Grafana :3000 reads Prometheus
@@ -121,7 +123,7 @@ CREATE TABLE orders (
   id          BIGSERIAL PRIMARY KEY,
   order_token UUID   NOT NULL UNIQUE,
   sale_id     BIGINT NOT NULL REFERENCES flash_sales(id),
-  user_id     BIGINT NOT NULL,
+  user_id     UUID   NOT NULL,   -- Keycloak subject (token "sub")
   status      TEXT   NOT NULL,   -- PENDING_PAYMENT | PAID | CANCELLED
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -143,9 +145,9 @@ The tables are owned by the `postgres` superuser, which only initialises the dat
 | Key | Type | Meaning | Written by |
 | :---- | :---- | :---- | :---- |
 | `sale:{saleId}:stock` | string (int) | units left to win | order-service (warm-up, restore), Lua (decrement) |
-| `sale:{saleId}:buyers` | set of userId | users who already won | Lua |
+| `sale:{saleId}:buyers` | set of user ids (UUID strings) | users who already won | Lua |
 | `sale:{saleId}:window` | string `"startMillis,endMillis"` | sale active window | order-service warm-up |
-| `rl:{userId}:{epochSecond}` | string (int), TTL 2 s | per-user rate-limit counter | sale-service |
+| `rl:{userId}:{epochSecond}` (userId = token subject) | string (int), TTL 2 s | per-user rate-limit counter | sale-service |
 
 A user whose order expires stays in `buyers` — one attempt per user per sale (documented design choice).
 
@@ -178,17 +180,24 @@ This script is the ONLY place stock is decremented. Never implement "read stock 
 
 - Topic `order-created`: 3 partitions, replication 1, created via a `NewTopic` bean in sale-service.
 - Message key: `userId` as string. Value: JSON string.
-- Event: `record OrderCreatedEvent(String orderToken, long saleId, long userId)`
+- Event: `record OrderCreatedEvent(String orderToken, long saleId, String userId)` — `userId` is the buyer's Keycloak subject (UUID).
 - Producer: `acks=all`, String serializers. The send is synchronous with a 2 s timeout (`.get(2, SECONDS)`).
 - Consumer group: `order-service`, `auto-offset-reset=earliest`. Delivery is at-least-once; the consumer MUST be idempotent.
 
 ## 9. API contracts
 
-User identity is a mock header `X-User-Id: <long>` (README notes that production would use JWT).
+Every protected call carries `Authorization: Bearer <access token>`. The user id is the token's `sub` (a UUID); the roles are Keycloak realm roles in `realm_access.roles`:
+
+| Role | Who | Can |
+| :---- | :---- | :---- |
+| `buyer` | every new user (realm default role) | buy, see and pay **own** orders |
+| `admin` | operators | `/admin/**` |
+
+A token is accepted only if all of these hold: valid RS256 signature from the realm's JWKS, `iss` = `OIDC_ISSUER`, `aud` contains `stockrush-api`, not expired, and `sub` is a UUID. Missing or invalid token → 401; valid token without the role → 403. See §17 for the load-test issuer.
 
 ### sale-service (behind Nginx at [http://localhost:8080](http://localhost:8080))
 
-`POST /sales/{saleId}/buy` (header `X-User-Id` required)
+`POST /sales/{saleId}/buy` (role `buyer`)
 
 | Lua result | HTTP | Body |
 | :---- | :---- | :---- |
@@ -198,11 +207,12 @@ User identity is a mock header `X-User-Id: <long>` (README notes that production
 | -2 | 403 | `{"status":"SALE_NOT_ACTIVE"}` |
 | 1 but Kafka send failed or timed out | 503 | `{"status":"TRY_AGAIN"}` |
 | Redis unavailable | 503 + `Retry-After: 1` | `{"status":"TRY_AGAIN"}` |
-| missing, non-numeric or non-positive `X-User-Id` | 401 | — |
+| no or invalid token | 401 | — |
+| token without the `buyer` role | 403 | — |
 | `saleId` ≤ 0 | 400 | — |
 | > 5 req/s for this user | 429 + `Retry-After: 1` | — |
 
-`GET /sales/{saleId}/stock` → `{"stock": <int>}` (reads Redis)
+`GET /sales/{saleId}/stock` → `{"stock": <int>}` (reads Redis; public, no token)
 
 ### order-service ([http://localhost:8090](http://localhost:8090))
 
@@ -213,9 +223,9 @@ User identity is a mock header `X-User-Id: <long>` (README notes that production
 | `POST /admin/sales/{id}/warmup` | stock in Redis = total_stock − count(orders PENDING_PAYMENT or PAID); sets `window`; returns `{"saleId","stock"}` |
 | `POST /admin/sales/{id}/reset` | TEST ONLY: delete the sale's orders, delete `stock` and `buyers` keys, then warm-up. Exists only when `RESET_ENABLED=true`; otherwise 404 |
 
-Both `/orders` endpoints require `X-User-Id` (401 otherwise) and only ever see the caller's own orders: another user's token behaves exactly like an unknown one. A token that is not a UUID is 400. Nginx exposes `/orders/*` and `/sales/*` on :8080 and nothing else.
+Both `/orders` endpoints need the `buyer` role and only ever see the caller's own orders (`WHERE … AND user_id = <token sub>`): another user's token behaves exactly like an unknown one. A token that is not a UUID is 400. Nginx exposes `/orders/*` and `/sales/*` on :8080 and nothing else.
 
-Admin endpoints are not authenticated until Step B of §17 (Keycloak `admin` role). Until then order-service must never be published beyond `127.0.0.1` or the Docker network.
+`/admin/**` needs the `admin` role. order-service is additionally published on `127.0.0.1` only.
 
 ## 10. Request flows
 
@@ -290,6 +300,9 @@ Each service reads env vars with local defaults so it runs from the IDE AND in D
 | `REDIS_PASSWORD` | from `.env` | from `.env` | from `.env` |
 | `DB_USER` / `DB_PASSWORD` | — | from `.env` | from `.env` |
 | `RESET_ENABLED` | — | false | from `.env` |
+| `OIDC_ISSUER` | http://localhost:8180/realms/stockrush | same | same (Keycloak's public URL, `KC_HOSTNAME`) |
+| `OIDC_JWK_SET_URI` | http://localhost:8180/realms/stockrush/protocol/openid-connect/certs | same | http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs |
+| `LOADTEST_JWT_SECRET` | — (off) | — (off) | only via `docker-compose.loadtest.yml` |
 
 Both services: Tomcat `accept-count: 1000`, `max-keep-alive-requests: 100000`, `keep-alive-timeout: 60s`, so a burst queues instead of being dropped and Nginx's upstream connections stay open.
 
@@ -343,11 +356,14 @@ Grafana panels (document the PromQL in README):
 **Accept:** with stock set to 10 and services run from the host:
 
 ```sh
-curl -X POST localhost:8090/admin/sales/1/reset
+curl -X POST -H "Authorization: Bearer $ADMIN" localhost:8090/admin/sales/1/reset
+curl -X POST -H "Authorization: Bearer $TOKEN" localhost:8080/sales/1/buy
 docker compose exec redis redis-cli SET sale:1:stock 10
 seq 1 200 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
   -X POST -H "X-User-Id: {}" localhost:8081/sales/1/buy | sort | uniq -c
 ```
+
+(As built in Phase 2, before Step B. Since Step B the same race runs as `k6 run -e LOADTEST_JWT_SECRET -e STOCK=10 -e VUS=50 -e ITERATIONS=200 loadtest/flash-sale.js` against the load-test stack, and the reset needs an admin token — see §16.)
 
 prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twice → 409; 6+ calls/second from one user → 429.
 
@@ -356,11 +372,11 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 - `OrderConsumer`, `OrderController` (status + pay), `PaymentTimeoutWorker`, `ReconciliationJob`.
 - Dockerfiles (`FROM eclipse-temurin:17-jre`, copy jar), compose services `sale-1`, `sale-2`, `order-service`, `nginx`; `infra/nginx.conf`.
 
-**Accept:** race test through `localhost:8080` (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` with the owner's `X-User-Id`); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
+**Accept:** race test through `localhost:8080` (Nginx limit commented out) still gives exactly 10 winners; 10 `PENDING_PAYMENT` rows; pay 3 (`POST /orders/{token}/pay` as the owner); with timeout = 1 min the other 7 become `CANCELLED` and Redis stock returns to 7; `docker compose stop sale-1` and buying still works.
 
 ### Phase 4 — Load test, monitoring, docs
 
-- `loadtest/flash-sale.js`: k6 `shared-iterations`, 1000 VUs, 20000 iterations, unique `X-User-Id` per iteration (`__VU * 100000 + __ITER`), custom counters `orders_won` (202) and `sold_out` (410), check `status < 500`.
+- `loadtest/flash-sale.js`: k6 `shared-iterations`, 1000 VUs, 20000 iterations, a distinct user per iteration (`__VU * 100000 + __ITER`, sent as that user's bearer token since Step B), custom counters `orders_won` (202) and `sold_out` (410), check `status < 500`.
 - Metrics per §13, `infra/prometheus.yml`, prometheus + grafana in compose.
 - README: summary + headline result, architecture diagram, how to run, request flow, design decisions & trade-offs (Lua vs `SELECT ... FOR UPDATE` vs optimistic locking; why Kafka; idempotency; sold-out flag; failure scenarios), results table, Grafana screenshot, limitations & next steps.
 
@@ -370,14 +386,16 @@ prints exactly `10 202` and `190 410`; `SCARD sale:1:buyers` = 10; same user twi
 
 ```sh
 cp .env.example .env                      # once; then change the passwords
+TOKEN=$(scripts/token.sh buyer1)          # demo users: buyer1, buyer2, shopadmin (password DEMO_USER_PASSWORD)
+ADMIN=$(scripts/token.sh shopadmin)
 docker compose up -d                      # start everything
 (cd sale-service && ./mvnw -DskipTests package)
 (cd order-service && ./mvnw -DskipTests package)
 docker compose up -d --build              # rebuild services after code changes
 curl -X POST localhost:8090/admin/sales/1/reset
-docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d nginx   # per-IP limit off
-k6 run loadtest/flash-sale.js             # or: docker run --rm -i --network host -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
-docker compose up -d nginx                # per-IP limit back on
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d   # per-IP limit off, load-test issuer on
+k6 run -e LOADTEST_JWT_SECRET loadtest/flash-sale.js   # after `set -a; . ./.env; set +a`; or: docker run --rm -i --network host -e LOADTEST_JWT_SECRET -v "$PWD/loadtest:/scripts:ro" grafana/k6:1.2.0 run /scripts/flash-sale.js
+docker compose up -d                      # back to normal: per-IP limit on, load-test issuer off
 docker compose exec postgres psql -U postgres -d flashsale
 docker compose exec redis redis-cli     # authenticates via REDISCLI_AUTH
 docker compose down -v                    # wipe data (needed after changing DB passwords)
@@ -395,7 +413,7 @@ docker compose down -v                    # wipe data (needed after changing DB 
 | Secrets in git | `.env` git-ignored; no defaults for secrets; `.env.example` only |
 | Metrics and health leaking internals | Actuator on an internal management port |
 | Accidental data wipe | `reset` endpoint absent unless `RESET_ENABLED=true` |
-| Malformed or hostile input | Positive `saleId` (400) and `X-User-Id` (401), header length capped |
+| Malformed or hostile input | Positive `saleId` (400); token claims validated (401) |
 | Hung threads / cascading failure on Redis outage | 1 s Redis timeouts, clean 503 + `Retry-After` |
 | Rate-limit counter without TTL | Atomic `rate_limit.lua` |
 | Instance clock skew deciding the sale window | `buy.lua` uses Redis `TIME` |
@@ -406,22 +424,33 @@ docker compose down -v                    # wipe data (needed after changing DB 
 | Compromised app container | Runs as non-root `app` user, read-only filesystem, `cap_drop: ALL`, `no-new-privileges`, 512 MB memory limit |
 | Internal endpoints reachable from outside | Nginx routes only `/sales/*` and `/orders/*`; sale containers are not published; order-service on `127.0.0.1` only |
 | Slow or oversized requests | Nginx: 1 KB body limit, 5 s header/body timeouts, 1 s upstream connect timeout |
-| Reading or paying someone else's order | `/orders` queries filter on the caller's user id |
+| Reading or paying someone else's order | `/orders` queries filter on the token subject |
 | Monitoring exposed | Prometheus and Grafana bound to `127.0.0.1`; Grafana admin password from `.env`, sign-up, anonymous access and phone-home analytics off |
 
-### Step B — after Phase 3: identity with Keycloak
+### Step B — identity with Keycloak (in place)
 
-- Keycloak in compose (realm `stockrush`, imported from `infra/keycloak/`), its own Postgres database.
-- Both services become OAuth2 resource servers (Spring Security, JWT validation against the realm's JWKS).
-- The user id comes from the token's `sub` claim; `X-User-Id` is removed.
-- `/admin/**` requires the `admin` realm role. The order ownership check (already enforced on `X-User-Id`) moves to the token's subject.
+| Threat | Control |
+| :---- | :---- |
+| Anyone claiming to be any user | User id is the `sub` of a Keycloak access token; the `X-User-Id` header is gone |
+| Forged or tampered tokens | RS256 signature checked against the realm's JWKS; `alg=none` and edited payloads → 401 |
+| Tokens for another app or realm | `iss` must equal `OIDC_ISSUER` and `aud` must contain `stockrush-api` (an audience mapper on both clients adds it) |
+| Stolen tokens living forever | 5-minute access tokens |
+| Buyers using operator endpoints | `/admin/**` needs the `admin` realm role; operators cannot buy |
+| Password guessing | Keycloak brute-force protection (lockout after 5 failures), 12-character minimum |
+| Shared database blast radius | Keycloak has its own database and role; it cannot connect to `flashsale` |
+
+- Realm `stockrush` is imported from `infra/keycloak/stockrush-realm.json`. Clients: `stockrush-web` (browser, authorization code + PKCE) and `stockrush-cli` (password grant, **local development only** — remove in production). Demo users `buyer1`, `buyer2` (`buyer`) and `shopadmin` (`admin`) get `DEMO_USER_PASSWORD` from `.env` at import. `scripts/token.sh <user>` prints a token.
+- Keycloak runs `start-dev` (plain HTTP) for local use. `KC_HOSTNAME=http://localhost:8180` fixes the issuer, so tokens fetched on the host validate inside Docker, where the services read keys from `keycloak:8080`.
+- **Load-test issuer.** k6 cannot log in 20 000 Keycloak users. `docker-compose.loadtest.yml` sets `LOADTEST_JWT_SECRET` on the services, which then also accept HS256 tokens with `iss = stockrush-loadtest`, signed with that secret (same audience, expiry and subject rules). Without the secret — the normal stack — such tokens are rejected (verified: 401). Services log a WARN at startup whenever it is on.
 - Rate limits apply per authenticated account; Nginx keeps the per-IP limit.
+- Schema change: `orders.user_id` is a UUID. An existing local database must be recreated (`docker compose down -v`); Flyway (Step C) will handle such changes as migrations.
 
 ### Step C — after Phase 4
 
 - Virtual waiting room / queue token issued before the sale opens; CAPTCHA on suspicious traffic.
 - TLS at Nginx; Kafka SASL; Redis ACL users per service.
-- Dead-letter topic and retry with backoff for the consumer; Flyway migrations.
+- Dead-letter topic for the consumer; Flyway migrations.
+- Keycloak in production mode (`start`, TLS, a real hostname); drop the `stockrush-cli` password-grant client.
 - Image scanning in CI; branch protection on `main`.
 - Structured JSON logs with request ids; alerts on `flashsale_reconcile_mismatch_total`.
 
