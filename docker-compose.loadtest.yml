@@ -8,8 +8,12 @@
 # 2. Makes the services also accept tokens from the "stockrush-loadtest" issuer, HMAC-signed with
 #    LOADTEST_JWT_SECRET, so k6 can act as 20 000 distinct users without 20 000 Keycloak logins.
 #    Keycloak tokens keep working. The normal stack never sets this secret, so it never trusts that issuer.
+# 3. Traces 10% of requests instead of all of them.
 x-loadtest-issuer: &loadtest-issuer
   LOADTEST_JWT_SECRET: ${LOADTEST_JWT_SECRET:?set LOADTEST_JWT_SECRET in .env (32+ characters)}
+  # Trace 10% of requests. Tracing every request in a 20,000-buyer burst cost ~14% throughput and pushed some
+  # Redis calls past their 1 s timeout (safe 503s); at 10% there was no measurable cost (docs/tracing.md).
+  TRACING_SAMPLING: "0.1"
 
 services:
   nginx:

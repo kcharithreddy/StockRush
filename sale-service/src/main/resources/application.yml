@@ -34,6 +34,9 @@ spring:
       connect-timeout: 1s
   kafka:
     bootstrap-servers: ${KAFKA:localhost:9092}
+    template:
+      # Adds the trace context (traceparent header) to every order event, so the trace continues in order-service.
+      observation-enabled: true
     producer:
       acks: all
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -72,6 +75,29 @@ management:
     health:
       probes:
         enabled: true
+  tracing:
+    sampling:
+      # Share of requests traced: all of them by default; load tests lower it (TRACING_SAMPLING).
+      probability: ${TRACING_SAMPLING:1.0}
+    export:
+      # Off unless a collector is configured, so local runs and tests do not try to reach one.
+      # docker-compose.yml turns it on and points it at Grafana Tempo.
+      enabled: ${TRACING_EXPORT_ENABLED:false}
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        # Metrics stay pull-based on /actuator/prometheus; the OpenTelemetry starter would also push them via OTLP.
+        enabled: false
+  logging:
+    export:
+      otlp:
+        # Logs go to stdout as JSON, not over OTLP.
+        enabled: false
   metrics:
     distribution:
       percentiles-histogram:
@@ -79,6 +105,6 @@ management:
 
 logging:
   pattern:
-    # Plain-text logs (local runs) show the request id too. Docker switches to JSON (ECS), see docker-compose.yml.
-    correlation: "[%X{request_id:-}] "
+    # Plain-text logs (local runs) show the request id and trace id too. Docker switches to JSON (ECS), see docker-compose.yml.
+    correlation: "[%X{request_id:-} %X{traceId:-}] "
 

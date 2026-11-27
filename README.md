@@ -63,7 +63,7 @@ flowchart LR
 | **PostgreSQL** | Source of truth for orders. |
 | **Prometheus + Grafana** | Metrics and the provisioned dashboard above. |
 
-Tech: Java 17, Spring Boot 4.2, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, Prometheus 3.5, Grafana 12.
+Tech: Java 17, Spring Boot 4.2, Spring Security (OAuth2 resource server), Keycloak 26, Redis 7.4, Kafka 3.8 (KRaft), PostgreSQL 16, Nginx 1.27, Docker Compose, k6, Micrometer, OpenTelemetry, Grafana Tempo 2.8, Prometheus 3.5, Grafana 12.
 
 ## Run it
 
@@ -106,6 +106,7 @@ Tokens last 5 minutes; run `scripts/token.sh` again when you get a 401.
 | http://localhost:8090 | order-service admin (host only) |
 | http://localhost:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` from `.env`) |
 | http://localhost:9090 | Prometheus |
+| http://localhost:3000/explore | Traces: Explore → **Tempo** (search, TraceQL, service graph) |
 | http://localhost:9093 | Alertmanager (alerts: oversell risk, service down, dead-lettered events, errors, latency, consumer lag) |
 | http://localhost:8180 | Keycloak (admin console: `admin` / `KEYCLOAK_ADMIN_PASSWORD` from `.env`) |
 
@@ -259,6 +260,10 @@ Everything — k6, Nginx, both JVMs, order-service, Redis, Kafka, PostgreSQL, Ke
 ## Monitoring
 
 Every request gets an id from Nginx, returned as `X-Request-Id` and carried through both services and Kafka, so one purchase can be followed from the Nginx access log to the order being written; the services log JSON (Elastic Common Schema) in Docker.
+
+**Distributed tracing.** Every purchase is also one OpenTelemetry trace across both services, through Kafka. The trace covers the JWT check, the Redis scripts, the Kafka send, order processing and the database write. Traces are stored in Grafana Tempo, which also draws a live service graph. Traces carry no user ids or order tokens, and a test enforces it. Tracing 100% of a 20,000-buyer burst cost about 14% throughput, while 10% sampling cost nothing measurable; load-test mode uses 10%. Details, measurements and how to find a purchase: [docs/tracing.md](docs/tracing.md).
+
+<img src="docs/tracing-trace.png" alt="One purchase as a trace in Grafana: sale-service, Redis, Kafka, order-service, PostgreSQL" width="720">
 
 Prometheus scrapes both sale-service instances and order-service on their internal management ports every 5 s. Grafana loads the **StockRush — Flash Sale** dashboard automatically.
 

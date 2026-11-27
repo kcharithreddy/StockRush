@@ -28,8 +28,12 @@ x-sale-service: &sale-service
     REDIS_SALE_PASSWORD: ${REDIS_SALE_PASSWORD:?set REDIS_SALE_PASSWORD in .env}
     KAFKA: kafka:29092
     OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
-    # One JSON object per log line (Elastic Common Schema), including request_id.
+    # One JSON object per log line (Elastic Common Schema), including request_id and trace id.
     LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
+    # Traces to Grafana Tempo. TRACING_SAMPLING (in .env) is the share of requests traced, 0.0 to 1.0.
+    TRACING_EXPORT_ENABLED: "true"
+    OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+    TRACING_SAMPLING: ${TRACING_SAMPLING:-1.0}
   depends_on:
     redis:
       condition: service_healthy
@@ -200,6 +204,9 @@ services:
       OIDC_JWK_SET_URI: http://keycloak:8080/realms/stockrush/protocol/openid-connect/certs
       LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
       # Ops assistant (POST /admin/assistant/summary): off unless OPENAI_API_KEY is set in .env.
+      TRACING_EXPORT_ENABLED: "true"
+      OTLP_TRACES_ENDPOINT: http://tempo:4318/v1/traces
+      TRACING_SAMPLING: ${TRACING_SAMPLING:-1.0}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       ALERTMANAGER_URL: http://alertmanager:9093
@@ -251,6 +258,8 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=7d
+      # Tempo pushes the service-graph metrics it derives from traces.
+      - --web.enable-remote-write-receiver
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
@@ -279,6 +288,19 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Distributed traces (OpenTelemetry over OTLP) from sale-service and order-service. Explore them in Grafana.
+  tempo:
+    image: grafana/tempo:2.8.2
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempodata:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"   # Tempo's query API, for curl; Grafana uses the internal address
+    security_opt:
+      - no-new-privileges:true
+
   grafana:
     image: grafana/grafana:12.1.0
     restart: unless-stopped
@@ -300,6 +322,7 @@ services:
       - no-new-privileges:true
     depends_on:
       - prometheus
+      - tempo
 
 volumes:
   pgdata:
@@ -307,3 +330,4 @@ volumes:
   promdata:
   grafanadata:
   alertdata:
+  tempodata:

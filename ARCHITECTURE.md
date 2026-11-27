@@ -96,6 +96,7 @@ flash-sale-system/
 │   └── Dockerfile
 ├── web/                     # the shop page: index.html, app.js, app.css (static, no build step; served by Nginx)
 ├── scripts/                 # dev-cert.sh, token.sh, keycloak-web-client.sh
+├── infra/tempo/tempo.yaml    # Grafana Tempo: trace storage + service-graph metrics (§22)
 ├── chaos/run.sh             # chaos tests: kill a component mid-sale, then check the invariants (§21)
 ├── docker-compose.loadtest.yml  # override: per-IP limit off for k6
 ├── loadtest/
@@ -618,4 +619,22 @@ No user id, order token or other personal data. A test fails if any UUID appears
   Orders may exceed the confirmed wins: a request can succeed on the server after the client stopped waiting, and that order is still a real, paid-for unit for that user.
 - **CI.** `.github/workflows/chaos.yml` builds the stack on a fresh runner with random passwords and runs the suite weekly and on demand. The results table goes on the run's summary page.
 - **Not covered:** host power loss (Redis `appendfsync everysec` can lose ≈1 s; reconciliation flags `redis_high`) and simultaneous faults.
+
+## 22. Distributed tracing
+
+OpenTelemetry through `spring-boot-starter-opentelemetry` (Micrometer Tracing with the OTel bridge) in both services. Traces are exported over OTLP/HTTP to Grafana Tempo (`infra/tempo/tempo.yaml`). Full write-up with measurements: [docs/tracing.md](docs/tracing.md).
+
+- **Spans:**
+  - HTTP server, through Spring Security;
+  - Redis, from Lettuce's built-in observation: the command only, never keys or arguments;
+  - Kafka send and process (`spring.kafka.template/listener.observation-enabled`);
+  - JDBC in order-service, from `datasource-micrometer-spring-boot` with `jdbc.includes: QUERY`: statement text with `?` placeholders, never the values.
+- **Propagation:** W3C `traceparent`, so one purchase is one trace across Kafka. The existing `X-Request-Id` and `request_id` stay alongside, and every JSON log line carries both `request_id` and `traceId`.
+- **Sampling** is set by `TRACING_SAMPLING`. Docker runs at 1.0, and `docker-compose.loadtest.yml` sets 0.1. At 1.0, a 20,000-buyer burst lost about 14% throughput and some Redis calls timed out into safe 503s; at 0.1 there was no measurable cost.
+- **Export** is on only when `TRACING_EXPORT_ENABLED=true` (Docker), so local runs and tests stay quiet. OTLP metrics and logs exporters are off: metrics remain on `/actuator/prometheus`.
+- **Service graph:** Tempo's metrics generator remote-writes the `traces_service_graph_*` and span metrics to Prometheus (`--web.enable-remote-write-receiver`). Grafana's Tempo datasource is provisioned with it.
+- **Test:** `TracePropagationTest` sends a record with a known `traceparent` through a real Kafka broker, captures the spans in memory, and asserts three things:
+  - the process span is a child of the producer span;
+  - the `INSERT` span is in the same trace;
+  - no user id or order token appears in any span.
 
