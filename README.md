@@ -220,9 +220,24 @@ A sale can be sold through a virtual waiting room (demo: sale 2). Buyers `POST /
 | PostgreSQL not up yet when order-service starts (e.g. after a host or Docker restart, when containers come back in any order) | order-service waits up to 60 s for it instead of crash-looping. |
 | PostgreSQL down | Orders wait in Kafka. The consumer retries with backoff (0.5 s → 30 s, up to 5 minutes), then catches up. If the outage outlasts that, the events are parked on the dead-letter topic and replayed with one admin call once the database is back. |
 | A malformed or unknown-sale event | Parked at once on `order-created.DLT` with its error, so one bad record cannot block a partition. Operators list parked events with `GET /admin/dead-letters` and replay them after fixing the cause with `POST /admin/dead-letters/replay` (safe: the consumer is idempotent). |
-| One sale-service instance dies | Nginx sends traffic to the other. A failed connect is retried on the other instance; a request that already reached an instance is never resent, so a buy is never duplicated. Tested with `docker compose stop sale-1`. |
+| One sale-service instance dies | Nginx sends traffic to the other. A failed connect is retried on the other instance; a request that already reached an instance is never resent, so a buy is never duplicated. Proven by killing `sale-1` mid-sale (below). |
 | order-service crashes between cancel and stock restore | Redis is one unit low (safe direction). Reconciliation reports `redis_low`. |
 | Redis and PostgreSQL disagree | The reconciliation job (every 60 s) logs and counts it: `redis_high` (oversell risk, ERROR) or `redis_low`. It reports only; it never auto-corrects. |
+
+### Proven under failure (chaos tests)
+
+`chaos/run.sh` kills one component **in the middle of a sale** (1,000 units, 30 new buyers per second), brings it back 15 s later, and then checks PostgreSQL and Redis directly. The checks: no oversell, every buyer told "won" has an order, Redis stock + orders = 1,000, and nothing dead-lettered.
+
+| Killed mid-sale | Buyers told "won" | Orders | Redis left | Result |
+| :-- | --: | --: | --: | :-- |
+| nothing (baseline) | 1,000 | 1,000 | 0 | all 4 checks pass |
+| one sale-service instance | 1,000 | 1,000 | 0 | all 4 checks pass (12 in-flight requests got no answer) |
+| Kafka broker | 894 | 894 | 106 | all 4 checks pass (907 buyers refused with 503, units returned) |
+| order-service | 1,000 | 1,000 | 0 | all 4 checks pass (orders caught up from Kafka) |
+| PostgreSQL | 1,000 | 1,000 | 0 | all 4 checks pass (writes retried until it was back) |
+| Redis (SIGKILL) | 1,000 | 1,000 | 0 | all 4 checks pass (stock restored from its append-only file) |
+
+Details, findings and the honest limits (a power loss of the Redis host is not covered): [docs/chaos-results.md](docs/chaos-results.md). Run it with `chaos/run.sh` in load-test mode. CI runs it weekly and on demand.
 
 ## Results
 
