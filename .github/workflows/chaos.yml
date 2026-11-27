@@ -1,0 +1,58 @@
+name: Chaos tests
+
+# Builds the whole stack on a fresh runner, then breaks one part at a time in the middle of a sale
+# (chaos/run.sh) and checks: no oversell, no lost purchase, stock adds up, nothing dead-lettered.
+# Too slow for every pull request (about 15 minutes), so it runs weekly and on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Scenarios to run, space-separated (empty = all)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "41 4 * * 3"
+
+permissions:
+  contents: read
+
+jobs:
+  chaos:
+    name: Break it mid-sale
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Random throwaway passwords for this run only.
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          for name in POSTGRES_PASSWORD DB_PASSWORD DB_MIGRATOR_PASSWORD REDIS_PASSWORD REDIS_SALE_PASSWORD \
+                      REDIS_ORDER_PASSWORD GRAFANA_ADMIN_PASSWORD KEYCLOAK_ADMIN_PASSWORD KEYCLOAK_DB_PASSWORD \
+                      DEMO_USER_PASSWORD LOADTEST_JWT_SECRET; do
+            sed -i "s|^$name=.*|$name=$(openssl rand -hex 24)|" .env
+          done
+          sed -i 's|^RESET_ENABLED=.*|RESET_ENABLED=true|' .env
+          scripts/dev-cert.sh
+
+      - name: Build
+        run: docker compose build
+
+      - name: Start in load-test mode
+        run: docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d
+
+      - name: Run chaos scenarios
+        env:
+          SCENARIOS: ${{ github.event.inputs.scenarios }}
+        run: |
+          # shellcheck disable=SC2086 # word splitting of the scenario list is intended
+          chaos/run.sh $SCENARIOS
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --tail 150 sale-1 sale-2 order-service kafka postgres redis nginx

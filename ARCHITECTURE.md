@@ -96,6 +96,7 @@ flash-sale-system/
 │   └── Dockerfile
 ├── web/                     # the shop page: index.html, app.js, app.css (static, no build step; served by Nginx)
 ├── scripts/                 # dev-cert.sh, token.sh, keycloak-web-client.sh
+├── chaos/run.sh             # chaos tests: kill a component mid-sale, then check the invariants (§21)
 ├── docker-compose.loadtest.yml  # override: per-IP limit off for k6
 ├── loadtest/
 │   ├── flash-sale.js
@@ -601,4 +602,20 @@ No user id, order token or other personal data. A test fails if any UUID appears
 - failed sources listed rather than fatal;
 - admin role required;
 - off without a key, and the rate limit.
+
+## 21. Chaos tests
+
+`chaos/run.sh` proves the guarantees hold when a component dies mid-sale. Results and limits are in [docs/chaos-results.md](docs/chaos-results.md).
+
+- **Traffic.** `loadtest/chaos-sale.js` sends a steady stream of new buyers (constant arrival rate, 30/s for 60 s) to the chaos sale: sale 3, 1,000 units, migration V5. A sale under this traffic lasts about 35 s, unlike the 1-second flash sale.
+- **Faults**, one per scenario, all SIGKILL via `docker compose kill`: `sale-1`, `kafka`, `order-service`, `postgres`, `redis`, plus a fault-free `baseline`. Each fault starts 10 s into the traffic, and the component is started again 15 s later.
+- **Checks**, read from PostgreSQL and Redis directly after the system settles:
+  1. orders ≤ total stock;
+  2. orders ≥ buyers told `202`;
+  3. Redis stock + orders = total stock, within 3 minutes;
+  4. no new dead letters.
+
+  Orders may exceed the confirmed wins: a request can succeed on the server after the client stopped waiting, and that order is still a real, paid-for unit for that user.
+- **CI.** `.github/workflows/chaos.yml` builds the stack on a fresh runner with random passwords and runs the suite weekly and on demand. The results table goes on the run's summary page.
+- **Not covered:** host power loss (Redis `appendfsync everysec` can lose ≈1 s; reconciliation flags `redis_high`) and simultaneous faults.
 
